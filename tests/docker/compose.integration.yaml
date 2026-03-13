@@ -1,0 +1,114 @@
+# Docker-based integration test: mirror Ubuntu (noble + noble-updates + noble-security, same repo) + GitLab CE.
+# Clients: vim-three-versions (caches 2 vim .debs; serve auto-prunes to keep 1 — see logs), prune-demo (optional), ubuntu-client, ubuntu-client-24.
+# Run: docker compose -f tests/docker/compose.integration.yaml up --build -d
+#       docker compose -f tests/docker/compose.integration.yaml run --rm vim-three-versions
+#       docker compose -f tests/docker/compose.integration.yaml run --rm prune-demo
+#       docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client
+#       docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client-24
+# Then: docker compose -f tests/docker/compose.integration.yaml down
+
+services:
+  repo-man:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "18080:8080"
+    environment:
+      REPO_MIRROR_REPO_ROOT: /data
+      CACHE_VERSIONS_PER_PACKAGE: "1"
+    volumes:
+      - repo_data:/data
+    entrypoint: ["sh", "-c"]
+    # Seed Ubuntu upstream if config missing, then serve
+    command:
+      - |
+        if [ ! -f /data/config.yaml ]; then
+          repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ --layout classic --path-prefix /ubuntu --suites jammy,noble,noble-updates,noble-security --components main --archs amd64
+        fi
+        repo-man cache add-upstream --name gitlab-ce --url https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/ --layout classic --path-prefix /gitlab-ce --suites jammy --components main --archs amd64
+        exec repo-man serve --bind 0.0.0.0 --port 8080
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/metrics')"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Simulate a host with vim installed that does one update after another; caches 2 vim .debs. CACHE_VERSIONS_PER_PACKAGE=1 so prune drops 1.
+  vim-three-versions:
+    image: ubuntu:24.04
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+    command:
+      - bash
+      - -c
+      - |
+        rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu noble main' > /etc/apt/sources.list
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu noble-updates main' >> /etc/apt/sources.list
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu noble-security main' >> /etc/apt/sources.list
+        apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true
+        apt-get install -y --allow-unauthenticated vim=2:9.1.0016-1ubuntu7
+        apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true
+        apt-get install -y --allow-unauthenticated vim=2:9.1.0016-1ubuntu7.9
+        echo "Simulated host: initial vim install, then update (second vim version cached)."
+
+  # Run prune (keep 1 per package); one vim is dropped from cache.
+  prune-demo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      vim-three-versions:
+        condition: service_completed_successfully
+    environment:
+      REPO_MIRROR_REPO_ROOT: /data
+    volumes:
+      - repo_data:/data
+    entrypoint: ["repo-man"]
+    command: ["cache", "prune"]
+
+  ubuntu-client:
+    image: ubuntu:22.04
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+    # Use our mirror and install vim, then gitlab-ce
+    command:
+      - bash
+      - -c
+      - |
+        rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu jammy main' > /etc/apt/sources.list
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/gitlab-ce jammy main' >> /etc/apt/sources.list
+        apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true
+        apt-get install -y --allow-unauthenticated vim
+        vim --version
+        apt-get install -y --allow-unauthenticated gitlab-ce
+        gitlab-ctl status || true
+
+  ubuntu-client-24:
+    image: ubuntu:24.04
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+    command:
+      - bash
+      - -c
+      - |
+        rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu noble main' > /etc/apt/sources.list
+        apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true
+        apt-get install -y --allow-unauthenticated vim
+        vim --version
+
+volumes:
+  repo_data: {}

@@ -1,0 +1,24 @@
+# Optional: run repo-man + MinIO for local S3-style testing
+# Usage: docker compose up -d
+# Repo data and config in ./repo_data (bind mount)
+# Metrics: http://localhost:8080/metrics
+# Uses host DNS (/etc/resolv.conf) and proxy env (HTTP_PROXY, HTTPS_PROXY, NO_PROXY) from host when set.
+
+services:
+  repo-man:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - REPO_MIRROR_REPO_ROOT=/data
+      - CACHE_VERSIONS_PER_PACKAGE=3
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+      - http_proxy=${http_proxy:-}
+      - https_proxy=${https_proxy:-}
+      - no_proxy=${no_proxy:-}
+    volumes:
+      - ./repo_data:/data
+      - /etc/resolv.conf:/etc/resolv.conf:ro
+    command: ["serve", "--bind", "0.0.0.0", "--port", "8080"]

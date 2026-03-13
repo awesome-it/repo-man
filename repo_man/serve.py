@@ -1,0 +1,342 @@
+"""HTTP server that serves APT repo from storage and /metrics. Pull-through: fetch from upstream on miss."""
+
+from __future__ import annotations
+
+import logging
+import socket
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Callable
+from urllib.parse import unquote
+
+from repo_man.formats.apt.cache import (
+    fetch_metadata_from_upstream,
+    free_disk_until_under_watermark,
+    get_or_fetch_package,
+    parse_packages_for_hashes,
+    prune_upstream,
+    verify_and_update_package_hashes,
+)
+from repo_man.metrics import (
+    client_last_served_timestamp_seconds,
+    client_packages_served_total,
+    get_metrics_output,
+    http_request_duration_seconds,
+    http_requests_total,
+    packages_served_total,
+    upstream_last_access_timestamp_seconds,
+)
+from repo_man.storage.base import StorageBackend
+
+try:
+    from repo_man.hash_store.base import PackageHashStore as _PackageHashStore
+except ImportError:
+    _PackageHashStore = None  # type: ignore[misc, assignment]
+
+logger = logging.getLogger(__name__)
+_metrics_callback: Callable[[], str] | None = None
+
+# Client tracking: reverse DNS cache (ip -> hostname or ip); per-client stats via Prometheus only
+_reverse_dns_cache: dict[str, str] = {}
+_cache_lock = threading.Lock()
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="repo_man_reverse_dns")
+
+_REVERSE_LOOKUP_TIMEOUT = 1.0
+
+
+def _reverse_lookup(ip: str) -> None:
+    """Background: resolve IP to hostname; on success or failure update cache (fall back to IP)."""
+    try:
+        hostname, _, _ = socket.gethostbyaddr(ip)
+        with _cache_lock:
+            _reverse_dns_cache[ip] = hostname
+    except Exception:
+        with _cache_lock:
+            _reverse_dns_cache[ip] = ip
+
+
+def _get_client_id(ip: str) -> str:
+    """Return client id (hostname or IP). Never blocks; on first see use IP and enqueue reverse lookup."""
+    with _cache_lock:
+        if ip in _reverse_dns_cache:
+            return _reverse_dns_cache[ip]
+        _reverse_dns_cache[ip] = ip
+    _executor.submit(_reverse_lookup, ip)
+    return ip
+
+
+def set_metrics_callback(cb: Callable[[], str] | None = None) -> None:
+    global _metrics_callback
+    _metrics_callback = cb or get_metrics_output
+
+
+def _default_metrics() -> str:
+    return get_metrics_output()
+
+
+class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
+    """Serves repo files from storage and /metrics."""
+
+    storage: StorageBackend
+    upstreams: list[dict[str, Any]]  # name, path_prefix
+    local_prefixes: list[str]  # path prefixes that are local repos (e.g. "local")
+    metadata_ttl_seconds: int = 0  # 0 = no TTL; cached metadata re-fetched when older than this
+    package_hash_store: _PackageHashStore | None = None  # optional; when set, verify package hashes on metadata fetch
+    disk_high_watermark_bytes: int | None = None  # when set, auto-prune cache when usage exceeds this
+    get_disk_usage_fn: Callable[[], int] | None = None  # used with disk_high_watermark_bytes
+    keep_versions_per_package: int = 0  # when > 0, auto-prune to keep this many versions per package after each cache write
+
+    def _maybe_prune_old_versions(self) -> None:
+        """Keep only the latest keep_versions_per_package versions per package for each upstream."""
+        if self.keep_versions_per_package <= 0:
+            return
+        total_removed = 0
+        for u in self.upstreams:
+            name = u.get("name")
+            if name:
+                removed = prune_upstream(
+                    self.storage,
+                    name,
+                    self.keep_versions_per_package,
+                )
+                total_removed += removed
+        if total_removed:
+            logger.info(
+                "Auto-pruned %s cached package(s) (keep %s version(s) per package)",
+                total_removed,
+                self.keep_versions_per_package,
+            )
+
+    def _maybe_free_disk_over_watermark(self) -> None:
+        """If over disk high watermark, free cache (evict by oldest last_served when hash_store set)."""
+        if self.disk_high_watermark_bytes is None or self.get_disk_usage_fn is None:
+            return
+        usage = self.get_disk_usage_fn()
+        if usage <= self.disk_high_watermark_bytes:
+            return
+        upstream_ids = [u["name"] for u in self.upstreams if u.get("name")]
+        if not upstream_ids:
+            return
+        removed = free_disk_until_under_watermark(
+            self.storage,
+            upstream_ids,
+            self.disk_high_watermark_bytes,
+            self.get_disk_usage_fn,
+            hash_store=self.package_hash_store,
+        )
+        if removed:
+            logger.info("Auto-pruned %s cached package(s) (disk over high watermark)", removed)
+
+    def _path_prefix_to_storage_prefix(self, path_prefix: str) -> str | None:
+        """Map request path prefix to storage prefix. Returns cache/name or local/name."""
+        path_prefix = path_prefix.rstrip("/") or "/"
+        for u in self.upstreams:
+            p = (u.get("path_prefix") or "/").rstrip("/") or "/"
+            if path_prefix == p or path_prefix.startswith(p + "/"):
+                name = u.get("name")
+                if name:
+                    return f"cache/{name}"
+        for lp in self.local_prefixes:
+            lp_norm = lp.rstrip("/") or "/"
+            if path_prefix == lp_norm or path_prefix.startswith(lp_norm + "/"):
+                return (lp.strip("/") or "local").lstrip("/")
+        return None
+
+    def _find_upstream_by_prefix(self, path_prefix: str) -> dict | None:
+        for u in self.upstreams:
+            p = (u.get("path_prefix") or "/").rstrip("/") or "/"
+            if path_prefix == p or path_prefix.startswith(p + "/"):
+                return u
+        return None
+
+    def _get_storage_key(self, path: str) -> str | None:
+        path = unquote(path).strip("/")
+        if not path:
+            return None
+        if path == "metrics":
+            return "METRICS"
+        # Match shortest path_prefix so we get the full suffix for storage key
+        parts = path.split("/")
+        for i in range(1, len(parts) + 1):
+            prefix = "/" + "/".join(parts[:i])
+            storage_prefix = self._path_prefix_to_storage_prefix(prefix)
+            if storage_prefix:
+                suffix = "/".join(parts[i:]) if i < len(parts) else ""
+                if storage_prefix == "METRICS":
+                    return "METRICS"
+                key = f"{storage_prefix}/{suffix}" if suffix else storage_prefix
+                return key
+        return None
+
+    def _path_prefix_for_metrics(self) -> str:
+        path = (self.path or "").strip("/")
+        if path == "metrics":
+            return "/metrics"
+        parts = path.split("/")
+        return "/" + (parts[0] if parts else "")
+
+    def do_GET(self) -> None:
+        path_prefix = self._path_prefix_for_metrics()
+        start = time.perf_counter()
+        try:
+            key = self._get_storage_key(self.path)
+            if key == "METRICS":
+                content = (_metrics_callback or _default_metrics)()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(content.encode("utf-8"))))
+                self.end_headers()
+                self.wfile.write(content.encode("utf-8"))
+                http_requests_total.labels(method="GET", path_prefix="/metrics", status="200").inc()
+                return
+            if key is None:
+                logger.debug("Not found: path_prefix=%s path=%s", path_prefix, self.path)
+                self.send_error(404, "Not found")
+                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
+                return
+            data = self.storage.get(key)
+            # If cached metadata is past TTL, treat as stale so we refetch
+            if (
+                data is not None
+                and key.startswith("cache/")
+                and self.metadata_ttl_seconds > 0
+            ):
+                parts_key = key.split("/", 2)
+                if len(parts_key) >= 3 and not parts_key[2].startswith("pool/"):
+                    fetched_at_bytes = self.storage.get(key + ".fetched_at")
+                    if fetched_at_bytes is None:
+                        data = None
+                    else:
+                        try:
+                            fetched_at = float(fetched_at_bytes.decode("utf-8").strip())
+                            if time.time() - fetched_at > self.metadata_ttl_seconds:
+                                data = None
+                        except (ValueError, UnicodeDecodeError):
+                            data = None
+            served_from_upstream = False
+            if data is None and key.startswith("cache/"):
+                # Pull-through: fetch from upstream, store, then serve
+                parts = key.split("/", 2)  # cache, name, suffix
+                if len(parts) >= 3:
+                    upstream_id, suffix = parts[1], parts[2]
+                    upstream_config = next(
+                        (u for u in self.upstreams if u.get("name") == upstream_id),
+                        None,
+                    )
+                    if upstream_config:
+                        base_url = upstream_config.get("url") or upstream_config.get("base_url", "")
+                        if base_url:
+                            if suffix.startswith("pool/"):
+                                data = get_or_fetch_package(
+                                    upstream_id,
+                                    suffix,
+                                    upstream_config,
+                                    self.storage,
+                                )
+                                if data is not None:
+                                    served_from_upstream = True
+                            else:
+                                raw = fetch_metadata_from_upstream(base_url, suffix)
+                                if raw is not None:
+                                    upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
+                                    self.storage.put(key, raw)
+                                    self.storage.put(
+                                        key + ".fetched_at",
+                                        str(time.time()).encode("utf-8"),
+                                    )
+                                    # If this is a Packages file, parse and verify cached package hashes
+                                    if suffix.endswith("Packages.gz") or (
+                                        suffix.endswith("Packages") and not suffix.endswith("Packages.gz")
+                                    ):
+                                        path_hashes = parse_packages_for_hashes(raw)
+                                        if path_hashes and self.package_hash_store is not None:
+                                            verify_and_update_package_hashes(
+                                                upstream_id,
+                                                path_hashes,
+                                                self.storage,
+                                                self.package_hash_store,
+                                            )
+                                    data = raw
+                                    served_from_upstream = True
+            if served_from_upstream:
+                self._maybe_prune_old_versions()
+                self._maybe_free_disk_over_watermark()
+            if data is None:
+                logger.debug("Not found: path_prefix=%s key=%s", path_prefix, key)
+                self.send_error(404, "Not found")
+                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
+                return
+            self.send_response(200)
+            if key.endswith(".gz"):
+                self.send_header("Content-Type", "application/gzip")
+            elif key.endswith(".deb"):
+                self.send_header("Content-Type", "application/vnd.debian.binary-package")
+            else:
+                self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            http_requests_total.labels(method="GET", path_prefix=path_prefix, status="200").inc()
+            if key.endswith(".deb"):
+                packages_served_total.labels(path_prefix=path_prefix).inc()
+                source = "upstream" if served_from_upstream else "cache"
+                logger.info("Served package: path_prefix=%s source=%s package=%s", path_prefix, source, key)
+                # Record last_served for watermark eviction (oldest-first drop)
+                if self.package_hash_store is not None:
+                    parts_key = key.split("/", 2)
+                    if len(parts_key) >= 3:
+                        self.package_hash_store.set_last_served(parts_key[1], parts_key[2], time.time())
+                # Track client in Prometheus only (client = IP or hostname from reverse DNS)
+                try:
+                    client_ip = self.client_address[0] if self.client_address else None
+                    if client_ip:
+                        client_id = _get_client_id(client_ip)
+                        now = time.time()
+                        client_packages_served_total.labels(client=client_id).inc()
+                        client_last_served_timestamp_seconds.labels(client=client_id).set(now)
+                except Exception:
+                    pass
+            else:
+                source = "upstream" if served_from_upstream else "cache"
+                logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
+        finally:
+            http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        # Quiet logging by default; can be overridden
+        pass
+
+
+def run_server(
+    bind: str,
+    port: int,
+    storage: StorageBackend,
+    upstreams: list[dict[str, Any]],
+    local_prefixes: list[str] | None = None,
+    metadata_ttl_seconds: int = 0,
+    package_hash_store: _PackageHashStore | None = None,
+    disk_high_watermark_bytes: int | None = None,
+    get_disk_usage_fn: Callable[[], int] | None = None,
+    keep_versions_per_package: int = 0,
+) -> None:
+    """Run HTTP server until interrupted."""
+    local_prefixes = local_prefixes or []
+    handler = type("Handler", (RepoHTTPRequestHandler,), {
+        "storage": storage,
+        "upstreams": upstreams,
+        "local_prefixes": local_prefixes,
+        "metadata_ttl_seconds": metadata_ttl_seconds,
+        "package_hash_store": package_hash_store,
+        "disk_high_watermark_bytes": disk_high_watermark_bytes,
+        "get_disk_usage_fn": get_disk_usage_fn,
+        "keep_versions_per_package": keep_versions_per_package,
+    })
+    server = HTTPServer((bind, port), handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()

@@ -1,0 +1,41 @@
+[project]
+name = "repo-man"
+version = "0.1.0"
+description = "Extensible package repository manager: pull-through cache, local publish, HTTP serve. Pluggable package formats and storage backends (APT included)."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "httpx>=0.25",
+    "prometheus-client>=0.19",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-asyncio>=0.21",
+]
+redis = [
+    "redis>=5.0",
+]
+
+[project.scripts]
+repo-man = "repo_man.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-asyncio>=0.21",
+]
