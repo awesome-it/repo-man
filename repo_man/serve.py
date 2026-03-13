@@ -300,7 +300,25 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                     pass
             else:
                 source = "upstream" if served_from_upstream else "cache"
-                logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
+                if source == "cache" and key.startswith("cache/") and self.metadata_ttl_seconds > 0:
+                    fetched_at_bytes = self.storage.get(key + ".fetched_at")
+                    if fetched_at_bytes is not None:
+                        try:
+                            fetched_at = float(fetched_at_bytes.decode("utf-8").strip())
+                            expiry_at = fetched_at + self.metadata_ttl_seconds
+                            time_until_expiry = max(0.0, expiry_at - time.time())
+                            logger.info(
+                                "Served metadata from cache: path_prefix=%s key=%s time_until_expiry_seconds=%.0f",
+                                path_prefix,
+                                key,
+                                time_until_expiry,
+                            )
+                        except (ValueError, UnicodeDecodeError):
+                            logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
+                    else:
+                        logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
+                else:
+                    logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
         finally:
             http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
 

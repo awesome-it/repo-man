@@ -9,6 +9,7 @@ from typing import Any
 
 import click
 
+from repo_man import __version__
 from repo_man.cli import cache_cmd, config_cmd, publish_cmd, serve_cmd
 
 
@@ -18,6 +19,7 @@ def _output_json_result(obj: dict[str, Any]) -> None:
 
 
 @click.group()
+@click.version_option(__version__, prog_name="repo-man")
 @click.option(
     "--config",
     "config_path",

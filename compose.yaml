@@ -1,12 +1,13 @@
-# Optional: run repo-man + MinIO for local S3-style testing
+# Run repo-man for local use. Repo data in ./repo_data (bind mount).
 # Usage: docker compose up -d
-# Repo data and config in ./repo_data (bind mount)
 # Metrics: http://localhost:8080/metrics
-# Uses host DNS (/etc/resolv.conf) and proxy env (HTTP_PROXY, HTTPS_PROXY, NO_PROXY) from host when set.
+# Pre-built image: awesomeit/repo-man:latest. To use it, set 'image: awesomeit/repo-man:latest' and remove 'build'.
+# Uses host DNS (/etc/resolv.conf) and proxy env (HTTP_PROXY, etc.) from host when set.
 
 services:
   repo-man:
     build: .
+    # image: awesomeit/repo-man:latest   # use this instead of build to run the pre-built image
     ports:
       - "8080:8080"
     environment:
