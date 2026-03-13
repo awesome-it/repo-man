@@ -20,6 +20,7 @@ from repo_man.formats.apt.cache import (
     verify_and_update_package_hashes,
 )
 from repo_man.metrics import (
+    cache_upstream_fetch_errors_total,
     client_last_served_timestamp_seconds,
     client_packages_served_total,
     get_metrics_output,
@@ -239,6 +240,8 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                                     served_from_upstream = True
                             else:
                                 raw = fetch_metadata_from_upstream(base_url, suffix)
+                                if raw is None:
+                                    cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
                                 if raw is not None:
                                     upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
                                     self.storage.put(key, raw)

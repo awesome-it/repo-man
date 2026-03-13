@@ -1,8 +1,12 @@
 # repo-man
 
-Extensible package repository manager: pull-through cache (latest-N per package), local publish, and a single HTTP service. Handles packages through pluggable format and storage backends; APT is included—add other formats and backends as needed. [MIT License](LICENSE).
+**Package repository manager** for the office, datacenter, or pipeline: **pull-through cache**, **self-publishing**, and **metrics** in one service. One HTTP endpoint for your network; pluggable formats and storage (APT included). [MIT License](LICENSE).
 
-## Install (Docker, recommended for local run)
+- **Pull-through cache** — Packages and metadata are fetched from upstream on first request and cached; configurable latest-N retention and disk watermark. No full mirror, no wasted bandwidth.
+- **Self-publishing** — Ingest and serve your own packages (e.g. internal .deb) alongside cached upstreams under path prefixes you define.
+- **Metrics** — Prometheus `/metrics` on the same server: request counts, cache hit/miss, upstream fetch duration, prune and publish stats. **Client statistics** (packages served per client, last-served timestamp) let you see which hosts use the cache and alert when a host stops updating. See [docs/client-metrics.md](docs/client-metrics.md).
+
+## Install (Docker, recommended)
 
 **Run the server (repo data in `./repo_data`):**
 
@@ -15,8 +19,8 @@ docker run -d \
   awesomeit/repo-man:latest
 ```
 
-- Server listens on **http://localhost:8080**. Metrics: **http://localhost:8080/metrics**.
-- To add upstreams or publish packages, run CLI in the same container:
+- Listens on **http://localhost:8080**; Prometheus scrape target **http://localhost:8080/metrics**.
+- Add upstreams or publish packages via the CLI in the same container:
   ```bash
   docker exec repo-man repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ --layout classic --path-prefix /ubuntu --suites noble --components main --archs amd64
   docker exec repo-man repo-man publish add --path-prefix /local/ /path/on/host/pkg.deb   # copy .deb into container first, or use a bind mount
@@ -38,22 +42,26 @@ uv run pytest
 
 ## Configuration
 
-- `REPO_MIRROR_REPO_ROOT` – repo root directory (default: `./repo_data`)
-- `REPO_MIRROR_CONFIG` – path to config file (YAML/TOML)
-- `CACHE_VERSIONS_PER_PACKAGE` – keep latest N versions per package (default: 3)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REPO_MIRROR_REPO_ROOT` | Repo root (cache + published). | `./repo_data` |
+| `REPO_MIRROR_CONFIG` | Config file path (YAML/TOML). | — |
+| `CACHE_VERSIONS_PER_PACKAGE` | Latest N versions per package (retention). | 3 |
+
+Full reference: [docs/operations.md](docs/operations.md).
 
 ## Example (APT format)
 
-With **Docker**: use `docker exec repo-man repo-man <command> ...` for cache/publish; the server is already running. With **source**: run the CLI directly:
+With **Docker**, run cache/publish via `docker exec repo-man repo-man <command> ...`; the server is already up. From **source**, run the CLI directly:
 
 ```bash
-# Add upstream, publish packages, serve (omit 'serve' when using Docker; container already runs it)
+# Add upstream, publish packages, serve (omit 'serve' when using Docker)
 repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ --layout classic --path-prefix /ubuntu/
 repo-man publish add --path-prefix /local/ ./pkg.deb
 repo-man serve --port 8080
 ```
 
-Prometheus metrics: `GET /metrics` on the same server.
+Metrics are exposed on the same port: `GET /metrics` (Prometheus).
 
 ## Docker integration test
 

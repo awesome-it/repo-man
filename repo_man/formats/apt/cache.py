@@ -17,6 +17,7 @@ from repo_man.formats.apt.version import compare_versions
 from repo_man.hash_store.base import PackageHashStore
 from repo_man.metrics import (
     cache_package_hash_mismatch_total,
+    cache_upstream_fetch_errors_total,
     packages_pulled_from_upstream_total,
     upstream_last_access_timestamp_seconds,
 )
@@ -169,6 +170,7 @@ def get_or_fetch_package(
                 upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
                 logger.info("Saved package: upstream=%s package=%s", upstream_id, relative_path)
                 return r.content
+            cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
             logger.warning(
                 "Package fetch failed: upstream=%s path=%s status=%s",
                 upstream_id,
@@ -176,6 +178,7 @@ def get_or_fetch_package(
                 r.status_code,
             )
     except Exception as e:
+        cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
         logger.warning("Package fetch failed: upstream=%s path=%s error=%s", upstream_id, relative_path, e)
     return None
 
