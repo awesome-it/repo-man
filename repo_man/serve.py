@@ -20,6 +20,7 @@ from repo_man.formats.apt.cache import (
     verify_and_update_package_hashes,
 )
 from repo_man.metrics import (
+    cache_requests_total,
     cache_upstream_fetch_errors_total,
     client_last_served_timestamp_seconds,
     client_packages_served_total,
@@ -267,10 +268,14 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._maybe_prune_old_versions()
                 self._maybe_free_disk_over_watermark()
             if data is None:
+                if key.startswith("cache/"):
+                    cache_requests_total.labels(result="miss").inc()
                 logger.debug("Not found: path_prefix=%s key=%s", path_prefix, key)
                 self.send_error(404, "Not found")
                 http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
                 return
+            if key.startswith("cache/"):
+                cache_requests_total.labels(result="hit" if not served_from_upstream else "miss").inc()
             self.send_response(200)
             if key.endswith(".gz"):
                 self.send_header("Content-Type", "application/gzip")

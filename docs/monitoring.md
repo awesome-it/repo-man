@@ -1,6 +1,28 @@
 # Monitoring and alerting
 
-This document gives concrete Prometheus queries and alert ideas for repo-man: **client statistics**, **upstream update failures**, and **misconfiguration**. For per-client metrics and “hosts not updating” alerts, see [client-metrics.md](client-metrics.md).
+This document gives concrete Prometheus queries and alert ideas for repo-man: **cache statistics (hits and misses)**, **client statistics**, **upstream update failures**, and **misconfiguration**. For per-client metrics and “hosts not updating” alerts, see [client-metrics.md](client-metrics.md).
+
+---
+
+## Cache statistics (hits and misses)
+
+`repo_man_cache_requests_total` is a counter with label **`result`**: `hit` when the response was served from cache (storage), and `miss` when it was fetched from upstream (pull-through) or the request could not be satisfied (e.g. 404). Only requests for **cache** keys (`cache/<upstream>/...`) are counted; local/published paths are not.
+
+**Hit rate (fraction of cache lookups that were hits, over 5m):**
+
+```promql
+  rate(repo_man_cache_requests_total{result="hit"}[5m])
+/ (rate(repo_man_cache_requests_total{result="hit"}[5m]) + rate(repo_man_cache_requests_total{result="miss"}[5m]))
+```
+
+**Hit and miss rates (per second):**
+
+```promql
+rate(repo_man_cache_requests_total{result="hit"}[5m])
+rate(repo_man_cache_requests_total{result="miss"}[5m])
+```
+
+Use these to see how effective the pull-through cache is and to spot a sudden drop in hit rate (e.g. after a prune or upstream change).
 
 ---
 
@@ -116,6 +138,7 @@ rate(repo_man_publish_errors_total[5m]) > 0
 
 | Goal | Metrics | Example alert |
 |------|---------|----------------|
+| Cache hits and misses | `repo_man_cache_requests_total` (label `result`: hit, miss) | Hit rate = `rate(hit)/(rate(hit)+rate(miss))` |
 | Hosts not updating | `repo_man_client_last_served_timestamp_seconds` | Time since last package served > 7 days → [client-metrics.md](client-metrics.md) |
 | Upstream not updating | `repo_man_upstream_last_access_timestamp_seconds` | `time() - metric > 24*3600` |
 | Upstream fetch failures | `repo_man_cache_upstream_fetch_errors_total` | `rate(...[5m]) > threshold` |
