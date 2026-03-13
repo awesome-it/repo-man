@@ -3,5 +3,8 @@ variables:
 
 include:
   - project: awesome/cicd
-    file: dependency-track/python.yml
+    file: common.yml
     ref: v1.0
+  - project: awesome/cicd
+    file: dependency-track/python.yml
+    ref: v1.0    
