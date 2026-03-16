@@ -1,6 +1,6 @@
 # Docker-based integration test
 
-Runs repo-man in Docker Compose, seeds the Ubuntu (jammy, noble, noble-updates, noble-security) and GitLab CE upstreams, then uses client containers to verify the mirror and demonstrate cache pruning. Verifies pull-through cache (metadata and .deb fetched from upstream on first request, then served from cache).
+Runs repo-man in Docker Compose with **APT**, **RPM**, and **Alpine** upstreams. Seeds Ubuntu (jammy, noble, noble-updates, noble-security), Rocky 9 BaseOS (RPM), and Alpine 3.19 main. Client containers verify the mirror for each format and demonstrate cache pruning. Verifies pull-through cache (metadata and packages fetched from upstream on first request, then served from cache).
 
 ## Prerequisites
 
@@ -10,8 +10,9 @@ Runs repo-man in Docker Compose, seeds the Ubuntu (jammy, noble, noble-updates, 
 ## Run
 
 ```bash
-# From project root
+# From project root: start all services (repo-man + APT/RPM/Alpine upstreams)
 docker compose -f tests/docker/compose.integration.yaml up -d
+
 # Cache 2 vim versions from same repo (noble main + noble-updates); automatic prune drops 1 (CACHE_VERSIONS_PER_PACKAGE=1)
 docker compose -f tests/docker/compose.integration.yaml run --rm vim-three-versions
 
@@ -20,9 +21,21 @@ docker compose -f tests/docker/compose.integration.yaml logs repo-man
 
 # Optional: run cache prune manually (may remove 0 if auto-prune already ran)
 docker compose -f tests/docker/compose.integration.yaml run --rm prune-demo
+
+# APT clients (Ubuntu)
 docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client
 docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client-24
+
+# RPM client (Rocky Linux 9) — installs a package from repo-man mirror of Rocky 9 BaseOS
+docker compose -f tests/docker/compose.integration.yaml run --rm rpm-client
+
+# Alpine client — installs a package from repo-man mirror of Alpine 3.19 main
+docker compose -f tests/docker/compose.integration.yaml run --rm alpine-client
 ```
+
+### APT-only (faster)
+
+To run only APT-related clients and skip RPM/Alpine, use the same compose file but run only the APT services: `ubuntu-client`, `ubuntu-client-24`, `vim-three-versions`, `prune-demo`. The repo-man service still adds RPM and Alpine upstreams to config; to avoid that you would need a separate compose file or override the entrypoint (e.g. `compose.override.yaml` with a slimmer command).
 
 **vim-three-versions** (simulate host with vim that does one update after another):
 
@@ -39,17 +52,28 @@ docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client-2
 
 **ubuntu-client** (Ubuntu 22.04 / jammy):
 
-1. Points APT at `http://repo-man:8080/ubuntu` (jammy main) and `http://repo-man:8080/gitlab-ce` (jammy main)
-2. Runs `apt-get update` (metadata is pulled through from archive.ubuntu.com and packages.gitlab.com)
-3. Runs `apt-get install -y vim`, then `vim --version`
-4. Runs `apt-get install -y gitlab-ce`, then `gitlab-ctl status` (or true)
+1. Points APT at `http://repo-man:8080/ubuntu` (jammy main)
+2. Runs `apt-get update` (metadata is pulled through from archive.ubuntu.com via repo-man)
+3. Runs `apt-get install -y vim curl`, then `vim --version` and `curl --version`
 
 **ubuntu-client-24** (Ubuntu 24.04 / noble):
 
 1. Points APT at `http://repo-man:8080/ubuntu` (noble main)
 2. Runs `apt-get update`, then `apt-get install -y vim` and `vim --version`
 
-Exit code 0 from each client means the mirror served that suite successfully.
+**rpm-client** (Rocky Linux 9):
+
+1. Configures a YUM repo pointing at `http://repo-man:8080/rocky9` (mirror of Rocky 9 BaseOS)
+2. Runs `dnf install -y tar` (pull-through from upstream, then served from cache)
+3. Exit 0 means the RPM mirror worked
+
+**alpine-client** (Alpine 3.19):
+
+1. Adds `http://repo-man:8080/alpine319` to APK repositories (mirror of Alpine 3.19 main)
+2. Runs `apk add --no-cache musl` (pull-through from upstream)
+3. Exit 0 means the Alpine mirror worked
+
+Exit code 0 from each client means the mirror served that format successfully.
 
 ## Cleanup
 

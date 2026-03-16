@@ -1,0 +1,52 @@
+# repo-man Deployment for Kubernetes integration test.
+# Uses same image and config pattern as Docker Compose; seed Ubuntu upstream then serve.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: repo-man
+  namespace: default
+  labels:
+    app: repo-man
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: repo-man
+  template:
+    metadata:
+      labels:
+        app: repo-man
+    spec:
+      containers:
+        - name: repo-man
+          image: repo-man:test
+          imagePullPolicy: IfNotPresent
+          args:
+            - sh
+            - -c
+            - |
+              if [ ! -f /data/config.yaml ]; then
+                repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ \
+                  --format apt --layout classic --path-prefix /ubuntu \
+                  --suites noble,noble-updates,noble-security --components main --archs amd64
+              fi
+              exec repo-man serve --bind 0.0.0.0 --port 8080
+          env:
+            - name: REPO_MIRROR_REPO_ROOT
+              value: /data
+            - name: CACHE_VERSIONS_PER_PACKAGE
+              value: "2"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          emptyDir: {}

@@ -1,5 +1,5 @@
-# Docker-based integration test: mirror Ubuntu (noble + noble-updates + noble-security, same repo) + GitLab CE.
-# Clients: vim-three-versions (caches 2 vim .debs; serve auto-prunes to keep 1 — see logs), prune-demo (optional), ubuntu-client, ubuntu-client-24.
+# Docker-based integration test: mirror Ubuntu (jammy + noble + updates/security), Rocky 9 BaseOS (RPM), and Alpine 3.19.
+# Clients: vim-three-versions (caches 2 vim .debs; serve auto-prunes to keep 1 — see logs), prune-demo (optional), ubuntu-client, ubuntu-client-24, rpm-client, alpine-client.
 # Run: docker compose -f tests/docker/compose.integration.yaml up --build -d
 #       docker compose -f tests/docker/compose.integration.yaml run --rm vim-three-versions
 #       docker compose -f tests/docker/compose.integration.yaml run --rm prune-demo
@@ -20,13 +20,14 @@ services:
     volumes:
       - repo_data:/data
     entrypoint: ["sh", "-c"]
-    # Seed Ubuntu upstream if config missing, then serve
+    # Seed upstreams if config missing, then serve
     command:
       - |
         if [ ! -f /data/config.yaml ]; then
-          repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ --layout classic --path-prefix /ubuntu --suites jammy,noble,noble-updates,noble-security --components main --archs amd64
+          repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ --format apt --layout classic --path-prefix /ubuntu --suites jammy,noble,noble-updates,noble-security --components main --archs amd64
         fi
-        repo-man cache add-upstream --name gitlab-ce --url https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/ --layout classic --path-prefix /gitlab-ce --suites jammy --components main --archs amd64
+        repo-man cache add-upstream --name rocky9 --url https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/ --format rpm --path-prefix /rocky9
+        repo-man cache add-upstream --name alpine319 --url https://dl-cdn.alpinelinux.org/alpine/v3.19/main --format alpine --path-prefix /alpine319
         exec repo-man serve --bind 0.0.0.0 --port 8080
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/metrics')"]
@@ -79,19 +80,17 @@ services:
         condition: service_healthy
     environment:
       DEBIAN_FRONTEND: noninteractive
-    # Use our mirror and install vim, then gitlab-ce
+    # Use our mirror and install vim and curl (only via repo-man)
     command:
       - bash
       - -c
       - |
         rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
         echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu jammy main' > /etc/apt/sources.list
-        echo 'deb [allow-insecure=yes] http://repo-man:8080/gitlab-ce jammy main' >> /etc/apt/sources.list
         apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true
-        apt-get install -y --allow-unauthenticated vim
+        apt-get install -y --allow-unauthenticated vim curl
         vim --version
-        apt-get install -y --allow-unauthenticated gitlab-ce
-        gitlab-ctl status || true
+        curl --version
 
   ubuntu-client-24:
     image: ubuntu:24.04
@@ -109,6 +108,38 @@ services:
         apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true
         apt-get install -y --allow-unauthenticated vim
         vim --version
+
+  # RPM client: use repo-man as mirror for Rocky 9 BaseOS
+  rpm-client:
+    image: rockylinux:9
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        echo '[rocky9]' > /etc/yum.repos.d/rocky.repo
+        echo 'name=Rocky 9 BaseOS (via repo-man)' >> /etc/yum.repos.d/rocky.repo
+        echo 'baseurl=http://repo-man:8080/rocky9' >> /etc/yum.repos.d/rocky.repo
+        echo 'enabled=1' >> /etc/yum.repos.d/rocky.repo
+        echo 'gpgcheck=0' >> /etc/yum.repos.d/rocky.repo
+        dnf install -y tar
+        tar --version
+
+  # Alpine client: use repo-man as mirror for Alpine 3.19 main
+  alpine-client:
+    image: alpine:3.19
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        echo 'http://repo-man:8080/alpine319' >> /etc/apk/repositories
+        apk add --no-cache musl
+        musl --version || true
 
 volumes:
   repo_data: {}

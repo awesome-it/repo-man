@@ -28,12 +28,32 @@ def _config_path(ctx: click.Context):
 @click.command("serve")
 @click.option("--bind", default="0.0.0.0", help="Bind address.")
 @click.option("--port", type=int, default=8080, help="Port.")
+@click.option(
+    "--no-default-upstreams",
+    is_flag=True,
+    default=False,
+    help="Disable default upstreams (Ubuntu, Debian, Rocky 9, Alpine). Use with config or REPO_MIRROR_NO_DEFAULT_UPSTREAMS.",
+)
 @click.pass_context
-def serve(ctx: click.Context, bind: str, port: int) -> None:
-    """Run the HTTP server; serves APT repos by path prefix and /metrics."""
+def serve(
+    ctx: click.Context,
+    bind: str,
+    port: int,
+    no_default_upstreams: bool,
+) -> None:
+    """Run the HTTP server; serves repos by path prefix and /metrics. With no config, uses default upstreams."""
     repo_root = config_module.get_repo_root(ctx.obj.get("repo_root"))
     config_path = _config_path(ctx)
-    upstreams = config_module.get_upstreams_from_config(config_path) if config_path else []
+    upstreams, used_defaults = config_module.get_effective_upstreams(
+        config_path,
+        no_default_upstreams_flag=no_default_upstreams,
+    )
+    if used_defaults:
+        click.echo(
+            "Using default upstreams: /ubuntu (Ubuntu), /debian (Debian), /rocky9 (RPM), /alpine (Alpine). "
+            "Disable with --no-default-upstreams or REPO_MIRROR_NO_DEFAULT_UPSTREAMS=1",
+            err=True,
+        )
     storage = LocalStorageBackend(repo_root)
     local_prefixes = []  # Could be from config later
     metadata_ttl_seconds = config_module.get_metadata_ttl_seconds(config_path)

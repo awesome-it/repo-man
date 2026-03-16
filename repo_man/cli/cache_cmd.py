@@ -11,8 +11,8 @@ import click
 logger = logging.getLogger(__name__)
 
 from repo_man import config as config_module
-from repo_man.disk import get_repo_disk_usage_bytes
-from repo_man.formats.apt.cache import free_disk_until_under_watermark, prune_upstream
+from repo_man.disk import free_disk_until_under_watermark, get_repo_disk_usage_bytes
+from repo_man.formats.registry import get_backend
 from repo_man.hash_store import create_package_hash_store
 from repo_man.metrics import prune_duration_seconds, prune_packages_removed_total, prune_runs_total
 from repo_man.storage.local import LocalStorageBackend
@@ -37,29 +37,41 @@ def cache() -> None:
 
 @cache.command("add-upstream")
 @click.option("--name", required=True, help="Upstream name.")
-@click.option("--url", "base_url", required=True, help="Base URL of upstream APT repo.")
+@click.option("--url", "base_url", required=True, help="Base URL of upstream repo.")
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["apt", "rpm", "alpine"]),
+    default="apt",
+    help="Repo format (apt, rpm, alpine).",
+)
 @click.option(
     "--layout",
     type=click.Choice(["classic", "single-stream"]),
     default="classic",
-    help="Layout type.",
+    help="Layout type (APT only).",
 )
 @click.option("--path-prefix", default="/", help="Path prefix for serving (e.g. /ubuntu/).")
-@click.option("--suites", default="", help="Comma-separated suites (classic only).")
-@click.option("--components", default="", help="Comma-separated components (classic only).")
-@click.option("--archs", default="amd64", help="Comma-separated architectures.")
+@click.option("--suites", default="", help="Comma-separated suites (APT classic only).")
+@click.option("--components", default="", help="Comma-separated components (APT classic only).")
+@click.option("--archs", default="amd64", help="Comma-separated architectures (APT).")
+@click.option("--arch", default="", help="Architecture (RPM, e.g. x86_64).")
+@click.option("--branch", default="", help="Branch (Alpine, e.g. main, community).")
 @click.pass_context
 def add_upstream(
     ctx: click.Context,
     name: str,
     base_url: str,
+    format_name: str,
     layout: str,
     path_prefix: str,
     suites: str,
     components: str,
     archs: str,
+    arch: str,
+    branch: str,
 ) -> None:
-    """Register an upstream APT repo."""
+    """Register an upstream repo (APT, RPM, or Alpine)."""
     check_mode = ctx.obj.get("check_mode", False)
     out_json = ctx.obj.get("output_json")
     config_path = _config_path(ctx)
@@ -68,17 +80,23 @@ def add_upstream(
         "name": name,
         "url": base_url,
         "base_url": base_url,
+        "format": format_name,
         "layout": layout,
         "path_prefix": path_prefix.rstrip("/") or "/",
         "suites": [s.strip() for s in suites.split(",") if s.strip()],
         "components": [c.strip() for c in components.split(",") if c.strip()],
         "archs": [a.strip() for a in archs.split(",") if a.strip()],
     }
+    if format_name == "rpm" and arch:
+        new_entry["arch"] = arch.strip()
+    if format_name == "alpine" and branch:
+        new_entry["branch"] = branch.strip()
     existing = next((u for u in upstreams if u.get("name") == name), None)
     if existing and (
         existing.get("url") == base_url
         and existing.get("path_prefix") == new_entry["path_prefix"]
         and existing.get("layout") == layout
+        and existing.get("format", "apt") == format_name
     ):
         if out_json:
             out_json(changed=False, message=f"Upstream {name} unchanged", details={"name": name})
@@ -154,8 +172,9 @@ def list_upstreams(ctx: click.Context) -> None:
         name = u.get("name", "?")
         url = u.get("url", u.get("base_url", "?"))
         prefix = u.get("path_prefix", "/")
+        fmt = u.get("format", "apt")
         layout = u.get("layout", "classic")
-        click.echo(f"  {name}: {url} (prefix={prefix}, layout={layout})")
+        click.echo(f"  {name}: {url} (format={fmt}, prefix={prefix}, layout={layout})")
 
 
 @cache.command("prune")
@@ -183,7 +202,7 @@ def prune(ctx: click.Context, upstream: str | None) -> None:
     # Disk watermark: free cache (never published) when over high watermark
     watermark_removed = 0
     high_watermark = config_module.get_disk_high_watermark_bytes(config_path)
-    if high_watermark is not None and upstream_ids:
+    if high_watermark is not None and upstreams_list:
         usage = get_repo_disk_usage_bytes(repo_root)
         if usage > high_watermark:
             logger.info(
@@ -198,7 +217,7 @@ def prune(ctx: click.Context, upstream: str | None) -> None:
             )
             watermark_removed = free_disk_until_under_watermark(
                 storage,
-                upstream_ids,
+                upstreams_list,
                 high_watermark,
                 lambda: get_repo_disk_usage_bytes(repo_root),
                 hash_store=package_hash_store,
@@ -211,11 +230,17 @@ def prune(ctx: click.Context, upstream: str | None) -> None:
     removed = 0
     for u in upstreams_list:
         name = u.get("name")
-        if name:
-            r = prune_upstream(storage, name, keep_n)
+        if not name:
+            continue
+        fmt = u.get("format", "apt")
+        try:
+            backend = get_backend(fmt)
+            r = backend.prune_upstream(storage, name, keep_n)
             removed += r
             if r:
                 prune_packages_removed_total.labels(upstream=name).inc(r)
+        except ValueError:
+            pass
     prune_duration_seconds.observe(time.perf_counter() - start)
     total_removed = watermark_removed + removed
     logger.info(

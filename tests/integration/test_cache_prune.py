@@ -4,12 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from repo_man.disk import get_repo_disk_usage_bytes
-from repo_man.formats.apt.cache import (
-    free_disk_until_under_watermark,
-    list_cached_packages_by_name,
-    prune_upstream,
-)
+from repo_man.disk import free_disk_until_under_watermark, get_repo_disk_usage_bytes
+from repo_man.formats.apt.cache import list_cached_packages_by_name, prune_upstream
 from repo_man.storage.local import LocalStorageBackend
 
 
@@ -40,7 +36,7 @@ def test_free_disk_until_under_watermark_keeps_published(tmp_path: Path) -> None
     high_watermark = 20  # below current usage so we must free
     removed = free_disk_until_under_watermark(
         storage,
-        ["up"],
+        [{"name": "up", "format": "apt"}],
         high_watermark,
         lambda: get_repo_disk_usage_bytes(tmp_path),
     )

@@ -9,7 +9,10 @@ from repo_man.config import (
     DEFAULT_CACHE_VERSIONS_PER_PACKAGE,
     get_cache_versions_per_package,
     get_config_path,
+    get_default_upstreams,
+    get_disable_default_upstreams,
     get_effective_config,
+    get_effective_upstreams,
     get_repo_root,
     load_config_file,
 )
@@ -50,3 +53,58 @@ def test_get_effective_config() -> None:
 
 def test_load_config_file_missing(tmp_path: Path) -> None:
     assert load_config_file(tmp_path / "nonexistent.yaml") == {}
+
+
+def test_get_default_upstreams() -> None:
+    defaults = get_default_upstreams()
+    assert isinstance(defaults, list)
+    assert len(defaults) >= 4
+    names = {u.get("name") for u in defaults}
+    assert "ubuntu" in names
+    assert "debian" in names
+    assert "rocky9" in names
+    assert "alpine" in names
+    prefixes = {u.get("path_prefix") for u in defaults}
+    assert "/ubuntu" in prefixes
+    assert "/debian" in prefixes
+
+
+def test_get_effective_upstreams_no_config_uses_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    assert not config_path.exists()
+    upstreams, used_defaults = get_effective_upstreams(config_path, no_default_upstreams_flag=False)
+    assert used_defaults is True
+    assert len(upstreams) >= 4
+
+
+def test_get_effective_upstreams_no_defaults_flag(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    upstreams, used_defaults = get_effective_upstreams(config_path, no_default_upstreams_flag=True)
+    assert used_defaults is False
+    assert upstreams == []
+
+
+def test_get_effective_upstreams_config_with_upstreams(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("upstreams:\n  - name: custom\n    url: https://example.com/\n    path_prefix: /custom\n")
+    upstreams, used_defaults = get_effective_upstreams(config_path, no_default_upstreams_flag=False)
+    assert used_defaults is False
+    assert len(upstreams) == 1
+    assert upstreams[0]["name"] == "custom"
+
+
+def test_get_disable_default_upstreams_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPO_MIRROR_NO_DEFAULT_UPSTREAMS", "1")
+    assert get_disable_default_upstreams(None, flag_override=None) is True
+    monkeypatch.setenv("REPO_MIRROR_NO_DEFAULT_UPSTREAMS", "true")
+    assert get_disable_default_upstreams(None, flag_override=None) is True
+    monkeypatch.delenv("REPO_MIRROR_NO_DEFAULT_UPSTREAMS", raising=False)
+    assert get_disable_default_upstreams(None, flag_override=None) is False
+
+
+def test_get_disable_default_upstreams_config_key(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("disable_default_upstreams: true\n")
+    assert get_disable_default_upstreams(config_path, flag_override=None) is True
+    config_path.write_text("disable_default_upstreams: false\nupstreams: []\n")
+    assert get_disable_default_upstreams(config_path, flag_override=None) is False

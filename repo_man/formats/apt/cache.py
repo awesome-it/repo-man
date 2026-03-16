@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import logging
 import time
-from collections.abc import Callable
 from functools import cmp_to_key
 from typing import Any
 
@@ -141,6 +140,47 @@ def verify_and_update_package_hashes(
         hash_store.set(upstream_id, path, new_hash)
 
 
+def get_or_fetch(
+    upstream_id: str,
+    path_suffix: str,
+    upstream_config: dict[str, Any],
+    storage: StorageBackend,
+    package_hash_store: PackageHashStore | None = None,
+) -> tuple[bytes | None, bool]:
+    """
+    Single entry point for serve: return (data, from_upstream) for cache/<id>/path_suffix.
+    Checks storage first; on miss fetches (metadata or package) from upstream and stores.
+    """
+    prefix = _storage_prefix(upstream_id)
+    key = f"{prefix}/{path_suffix}" if path_suffix else prefix
+    existing = storage.get(key)
+    if existing is not None:
+        return (existing, False)
+    base_url = upstream_config.get("url") or upstream_config.get("base_url", "")
+    if not base_url:
+        return (None, False)
+    if path_suffix.startswith("pool/"):
+        relative_path = path_suffix
+        data = get_or_fetch_package(upstream_id, relative_path, upstream_config, storage)
+        return (data, data is not None)
+    # Metadata path: fetch from upstream, store, optionally verify Packages hashes
+    raw = fetch_metadata_from_upstream(base_url, path_suffix)
+    if raw is None:
+        cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+        return (None, False)
+    storage.put(key, raw)
+    storage.put(key + ".fetched_at", str(time.time()).encode("utf-8"))
+    upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
+    if (
+        (path_suffix.endswith("Packages.gz") or (path_suffix.endswith("Packages") and not path_suffix.endswith("Packages.gz")))
+        and package_hash_store is not None
+    ):
+        path_hashes = parse_packages_for_hashes(raw)
+        if path_hashes:
+            verify_and_update_package_hashes(upstream_id, path_hashes, storage, package_hash_store)
+    return (raw, True)
+
+
 def get_or_fetch_package(
     upstream_id: str,
     relative_path: str,
@@ -235,71 +275,3 @@ def prune_upstream(
                 logger.info("Pruned package: upstream=%s path=%s", upstream_id, path)
                 removed += 1
     return removed
-
-
-def _list_cached_packages_by_last_served(
-    storage: StorageBackend,
-    upstream_ids: list[str],
-    hash_store: PackageHashStore,
-) -> list[tuple[str, str, str, float]]:
-    """Return (storage_path, upstream_id, path, last_served_ts) for all cached .deb, sorted by last_served ascending (oldest first)."""
-    entries: list[tuple[str, str, str, float]] = []
-    for uid in upstream_ids:
-        prefix = _storage_prefix(uid)
-        for storage_path in storage.list_prefix(prefix):
-            if not storage_path.endswith(".deb"):
-                continue
-            # storage_path = cache/uid/pool/...
-            parts = storage_path.split("/", 2)
-            if len(parts) < 3:
-                continue
-            path = parts[2]
-            ts = hash_store.get_last_served(uid, path)
-            entries.append((storage_path, uid, path, ts if ts is not None else 0.0))
-    entries.sort(key=lambda x: x[3])
-    return entries
-
-
-def free_disk_until_under_watermark(
-    storage: StorageBackend,
-    upstream_ids: list[str],
-    high_watermark_bytes: int,
-    get_usage_fn: Callable[[], int],
-    hash_store: PackageHashStore | None = None,
-) -> int:
-    """
-    When repo usage is above high_watermark_bytes, free space by pruning only cache (never published).
-    If hash_store is set, evicts packages with oldest last_served first until under watermark.
-    Otherwise prunes to keep 1 version per package per upstream; if still over, prunes all cached packages.
-    get_usage_fn() is called to re-measure after each delete/round. Returns total number of packages removed.
-    """
-    if hash_store is not None:
-        total_removed = 0
-        while get_usage_fn() > high_watermark_bytes:
-            entries = _list_cached_packages_by_last_served(storage, upstream_ids, hash_store)
-            if not entries:
-                break
-            storage_path, upstream_id, path = entries[0][0], entries[0][1], entries[0][2]
-            if storage.delete(storage_path):
-                hash_store.delete(upstream_id, path)
-                total_removed += 1
-                logger.info(
-                    "Evicted package (oldest last_served, over watermark): upstream=%s path=%s",
-                    upstream_id,
-                    path,
-                )
-        return total_removed
-    total_removed = 0
-    while get_usage_fn() > high_watermark_bytes:
-        round_removed = 0
-        # Keep 1 version per package
-        for uid in upstream_ids:
-            round_removed += prune_upstream(storage, uid, keep_versions_per_package=1)
-        if round_removed == 0:
-            # Still over: clear all cached packages (keep 0)
-            for uid in upstream_ids:
-                round_removed += prune_upstream(storage, uid, keep_versions_per_package=0)
-            if round_removed == 0:
-                break
-        total_removed += round_removed
-    return total_removed

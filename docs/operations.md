@@ -15,10 +15,28 @@ Running repo-man in production: config reference, Prometheus metrics, and deploy
 | `REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES` | Repo disk high watermark; when exceeded, cache (not published) is pruned. | None (disabled) |
 | `REPO_MIRROR_PACKAGE_HASH_STORE` | Backend for package hash storage: `local` (SQLite under repo root) or `redis`. Used to detect when a cached package has changed on the remote; if so, the cache entry is dropped and a counter is incremented. | `local` |
 | `REPO_MIRROR_REDIS_URL` | Redis URL when `REPO_MIRROR_PACKAGE_HASH_STORE=redis`. | `redis://localhost:6379/0` |
+| `REPO_MIRROR_NO_DEFAULT_UPSTREAMS` | If set to `1`, `true`, or `yes`, disables built-in default upstreams when no config file (or empty upstreams) is present. | — |
+
+### Default upstreams (no config)
+
+When **no config file exists** (or the config file has no `upstreams`), repo-man uses **built-in default upstreams** so clients can use the mirror with minimal setup:
+
+- **APT** — `/ubuntu` (Ubuntu jammy, noble, noble-updates, noble-security), `/debian` (Debian bookworm, bookworm-updates)
+- **RPM** — `/rocky9` (Rocky Linux 9 BaseOS x86_64)
+- **Alpine** — `/alpine` (Alpine 3.19 main)
+
+To **disable** default upstreams (e.g. you want to define only your own upstreams):
+
+1. **Config file** — Set `disable_default_upstreams: true` in your YAML/TOML, or define any `upstreams` (then only those are used).
+2. **Environment** — Set `REPO_MIRROR_NO_DEFAULT_UPSTREAMS=1` (or `true` / `yes`).
+3. **CLI** — Run `repo-man serve --no-default-upstreams`.
 
 ### Config file shape (YAML example, APT upstreams)
 
 ```yaml
+# Set to true to disable built-in default upstreams when you want only the upstreams listed here
+# disable_default_upstreams: false
+
 upstreams:
   - name: ubuntu
     url: https://archive.ubuntu.com/ubuntu/
