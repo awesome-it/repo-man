@@ -272,6 +272,41 @@ If you want upstreams to exist before any client request, use an entrypoint that
 
 ---
 
+## 4. Kubernetes integration test (kind)
+
+**Goal:** Run repo-man in a local Kubernetes cluster (e.g. [kind](https://kind.sigs.k8s.io/)) and verify that a client pod can install packages via the mirror. Useful for CI or local validation that the same image and config work in K8s.
+
+### Flow
+
+1. **Create cluster:** `kind create cluster` (or use k3d).
+2. **Build and load image:** Build the repo-man image, then `kind load docker-image repo-man:test`.
+3. **Deploy:** Apply a **Deployment** (repo-man with seed-upstream-then-serve) and a **Service** (ClusterIP on port 8080).
+4. **Run client Job:** A **Job** runs an Ubuntu (or other) container that points APT at `http://repo-man:8080/ubuntu`, runs `apt-get update && apt-get install -y <pkg>`, and exits 0 on success.
+5. **Tear down:** `kind delete cluster` (or leave the cluster for inspection).
+
+### Manifests and script
+
+Under `tests/k8s/`:
+
+- **manifests/deployment.yaml** — repo-man Deployment; entrypoint seeds Ubuntu upstream if config is missing, then runs `repo-man serve`.
+- **manifests/service.yaml** — Service so pods can reach repo-man at `http://repo-man:8080`.
+- **manifests/job-apt-client.yaml** — Job that runs Ubuntu, configures APT to use repo-man, and installs a package (e.g. vim).
+- **run.sh** — Script that builds the image, creates the kind cluster (if needed), loads the image, applies manifests, and waits for the Job to complete.
+
+Run from project root:
+
+```bash
+./tests/k8s/run.sh
+```
+
+The same image and config support APT, RPM, and Alpine; the example Job tests APT. You can add RPM or Alpine upstreams to the deployment and add corresponding client Jobs (e.g. Rocky or Alpine image with dnf/apk pointing at repo-man).
+
+### CI
+
+In CI, use a job that has Docker and kind (or k3d) available: create cluster, build and load image, apply manifests, run the client Job, then delete the cluster. Exit non-zero if the Job fails or times out.
+
+---
+
 ## See also
 
 - [Operations](operations.md) — config reference, metrics, disk watermark.

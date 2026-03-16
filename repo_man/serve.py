@@ -11,14 +11,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable
 from urllib.parse import unquote
 
-from repo_man.formats.apt.cache import (
-    fetch_metadata_from_upstream,
-    free_disk_until_under_watermark,
-    get_or_fetch_package,
-    parse_packages_for_hashes,
-    prune_upstream,
-    verify_and_update_package_hashes,
-)
+from repo_man.disk import free_disk_until_under_watermark
+from repo_man.formats.registry import get_backend
 from repo_man.metrics import (
     cache_requests_total,
     cache_upstream_fetch_errors_total,
@@ -97,13 +91,19 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
         total_removed = 0
         for u in self.upstreams:
             name = u.get("name")
-            if name:
-                removed = prune_upstream(
+            if not name:
+                continue
+            fmt = u.get("format", "apt")
+            try:
+                backend = get_backend(fmt)
+                removed = backend.prune_upstream(
                     self.storage,
                     name,
                     self.keep_versions_per_package,
                 )
                 total_removed += removed
+            except ValueError:
+                pass
         if total_removed:
             logger.info(
                 "Auto-pruned %s cached package(s) (keep %s version(s) per package)",
@@ -118,12 +118,11 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
         usage = self.get_disk_usage_fn()
         if usage <= self.disk_high_watermark_bytes:
             return
-        upstream_ids = [u["name"] for u in self.upstreams if u.get("name")]
-        if not upstream_ids:
+        if not self.upstreams:
             return
         removed = free_disk_until_under_watermark(
             self.storage,
-            upstream_ids,
+            self.upstreams,
             self.disk_high_watermark_bytes,
             self.get_disk_usage_fn,
             hash_store=self.package_hash_store,
@@ -199,14 +198,13 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
                 return
             data = self.storage.get(key)
-            # If cached metadata is past TTL, treat as stale so we refetch
+            # If cached metadata is past TTL, treat as stale so we refetch (any path not a package file)
             if (
                 data is not None
                 and key.startswith("cache/")
                 and self.metadata_ttl_seconds > 0
             ):
-                parts_key = key.split("/", 2)
-                if len(parts_key) >= 3 and not parts_key[2].startswith("pool/"):
+                if not (key.endswith(".deb") or key.endswith(".rpm") or key.endswith(".apk")):
                     fetched_at_bytes = self.storage.get(key + ".fetched_at")
                     if fetched_at_bytes is None:
                         data = None
@@ -217,10 +215,13 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                                 data = None
                         except (ValueError, UnicodeDecodeError):
                             data = None
+                    # So backend.get_or_fetch will refetch: remove stale cache entry
+                    if data is None:
+                        self.storage.delete(key)
+                        self.storage.delete(key + ".fetched_at")
             served_from_upstream = False
             if data is None and key.startswith("cache/"):
-                # Pull-through: fetch from upstream, store, then serve
-                parts = key.split("/", 2)  # cache, name, suffix
+                parts = key.split("/", 2)
                 if len(parts) >= 3:
                     upstream_id, suffix = parts[1], parts[2]
                     upstream_config = next(
@@ -228,42 +229,18 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                         None,
                     )
                     if upstream_config:
-                        base_url = upstream_config.get("url") or upstream_config.get("base_url", "")
-                        if base_url:
-                            if suffix.startswith("pool/"):
-                                data = get_or_fetch_package(
-                                    upstream_id,
-                                    suffix,
-                                    upstream_config,
-                                    self.storage,
-                                )
-                                if data is not None:
-                                    served_from_upstream = True
-                            else:
-                                raw = fetch_metadata_from_upstream(base_url, suffix)
-                                if raw is None:
-                                    cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-                                if raw is not None:
-                                    upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
-                                    self.storage.put(key, raw)
-                                    self.storage.put(
-                                        key + ".fetched_at",
-                                        str(time.time()).encode("utf-8"),
-                                    )
-                                    # If this is a Packages file, parse and verify cached package hashes
-                                    if suffix.endswith("Packages.gz") or (
-                                        suffix.endswith("Packages") and not suffix.endswith("Packages.gz")
-                                    ):
-                                        path_hashes = parse_packages_for_hashes(raw)
-                                        if path_hashes and self.package_hash_store is not None:
-                                            verify_and_update_package_hashes(
-                                                upstream_id,
-                                                path_hashes,
-                                                self.storage,
-                                                self.package_hash_store,
-                                            )
-                                    data = raw
-                                    served_from_upstream = True
+                        fmt = upstream_config.get("format", "apt")
+                        try:
+                            backend = get_backend(fmt)
+                            data, served_from_upstream = backend.get_or_fetch(
+                                upstream_id,
+                                suffix,
+                                upstream_config,
+                                self.storage,
+                                self.package_hash_store,
+                            )
+                        except ValueError:
+                            pass
             if served_from_upstream:
                 self._maybe_prune_old_versions()
                 self._maybe_free_disk_over_watermark()
@@ -281,13 +258,17 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/gzip")
             elif key.endswith(".deb"):
                 self.send_header("Content-Type", "application/vnd.debian.binary-package")
+            elif key.endswith(".rpm"):
+                self.send_header("Content-Type", "application/x-rpm")
+            elif key.endswith(".apk"):
+                self.send_header("Content-Type", "application/vnd.apk")
             else:
                 self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
             http_requests_total.labels(method="GET", path_prefix=path_prefix, status="200").inc()
-            if key.endswith(".deb"):
+            if key.endswith((".deb", ".rpm", ".apk")):
                 packages_served_total.labels(path_prefix=path_prefix).inc()
                 source = "upstream" if served_from_upstream else "cache"
                 logger.info("Served package: path_prefix=%s source=%s package=%s", path_prefix, source, key)
@@ -327,6 +308,9 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                         logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
                 else:
                     logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            # Client closed the connection before we finished sending (e.g. apt/dnf cancelled)
+            logger.debug("Client closed connection before response completed: %s", e)
         finally:
             http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
 

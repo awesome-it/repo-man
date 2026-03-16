@@ -17,6 +17,7 @@ ENV_METADATA_TTL_SECONDS = "REPO_MIRROR_METADATA_TTL_SECONDS"
 ENV_DISK_HIGH_WATERMARK_BYTES = "REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES"
 ENV_PACKAGE_HASH_STORE = "REPO_MIRROR_PACKAGE_HASH_STORE"
 ENV_REDIS_URL = "REPO_MIRROR_REDIS_URL"
+ENV_NO_DEFAULT_UPSTREAMS = "REPO_MIRROR_NO_DEFAULT_UPSTREAMS"
 
 DEFAULT_CACHE_VERSIONS_PER_PACKAGE = 3
 DEFAULT_PACKAGE_HASH_STORE = "local"
@@ -167,6 +168,82 @@ def get_upstreams_from_config(config_path: Path | None) -> list[dict[str, Any]]:
     return []
 
 
+def get_default_upstreams() -> list[dict[str, Any]]:
+    """Return sane default upstreams when no config is provided (Ubuntu, Debian, Rocky 9, Alpine)."""
+    return [
+        {
+            "name": "ubuntu",
+            "url": "http://archive.ubuntu.com/ubuntu/",
+            "base_url": "http://archive.ubuntu.com/ubuntu/",
+            "format": "apt",
+            "layout": "classic",
+            "path_prefix": "/ubuntu",
+            "suites": ["jammy", "noble", "noble-updates", "noble-security"],
+            "components": ["main"],
+            "archs": ["amd64"],
+        },
+        {
+            "name": "debian",
+            "url": "https://deb.debian.org/debian/",
+            "base_url": "https://deb.debian.org/debian/",
+            "format": "apt",
+            "layout": "classic",
+            "path_prefix": "/debian",
+            "suites": ["bookworm", "bookworm-updates"],
+            "components": ["main"],
+            "archs": ["amd64"],
+        },
+        {
+            "name": "rocky9",
+            "url": "https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/",
+            "base_url": "https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/",
+            "format": "rpm",
+            "path_prefix": "/rocky9",
+        },
+        {
+            "name": "alpine",
+            "url": "https://dl-cdn.alpinelinux.org/alpine/v3.19/main",
+            "base_url": "https://dl-cdn.alpinelinux.org/alpine/v3.19/main",
+            "format": "alpine",
+            "path_prefix": "/alpine",
+        },
+    ]
+
+
+def get_disable_default_upstreams(
+    config_path: Path | None,
+    flag_override: bool | None = None,
+) -> bool:
+    """True if default upstreams should be disabled (config key, env var, or --no-default-upstreams)."""
+    if flag_override is True:
+        return True
+    value = os.environ.get(ENV_NO_DEFAULT_UPSTREAMS)
+    if value is not None and str(value).strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if config_path and config_path.exists():
+        data = load_config_file(config_path)
+        if data.get("disable_default_upstreams") is True:
+            return True
+    return False
+
+
+def get_effective_upstreams(
+    config_path: Path | None,
+    no_default_upstreams_flag: bool = False,
+) -> tuple[list[dict[str, Any]], bool]:
+    """
+    Return (upstreams, used_defaults). Upstreams from config if non-empty; else default
+    upstreams unless disabled by config, env REPO_MIRROR_NO_DEFAULT_UPSTREAMS, or --no-default-upstreams.
+    used_defaults is True when the returned list is the built-in default upstreams.
+    """
+    from_config = get_upstreams_from_config(config_path) if config_path else []
+    if from_config:
+        return (from_config, False)
+    if get_disable_default_upstreams(config_path, flag_override=no_default_upstreams_flag or None):
+        return ([], False)
+    return (get_default_upstreams(), True)
+
+
 def save_upstreams_to_config(config_path: Path, upstreams: list[dict[str, Any]]) -> None:
     """Write upstreams to YAML config file."""
     import yaml
@@ -188,11 +265,14 @@ def get_effective_config(
     *,
     config_path_override: Path | None = None,
     repo_root_override: Path | None = None,
+    no_default_upstreams: bool = False,
 ) -> dict[str, Any]:
-    """Return effective config as a single dict (for config show)."""
+    """Return effective config as a single dict (for config show). Uses effective upstreams (defaults when no config)."""
     repo_root = get_repo_root(repo_root_override)
     config_path = get_config_path(config_path_override)
-    upstreams = get_upstreams_from_config(config_path) if config_path else []
+    if config_path is None:
+        config_path = repo_root / "config.yaml"
+    upstreams, _ = get_effective_upstreams(config_path, no_default_upstreams_flag=no_default_upstreams)
     return {
         "repo_root": str(repo_root),
         "config_file": str(config_path) if config_path else None,

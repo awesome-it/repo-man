@@ -47,16 +47,32 @@ uv run pytest
 | `REPO_MIRROR_REPO_ROOT` | Repo root (cache + published). | `./repo_data` |
 | `REPO_MIRROR_CONFIG` | Config file path (YAML/TOML). | — |
 | `CACHE_VERSIONS_PER_PACKAGE` | Latest N versions per package (retention). | 3 |
+| `REPO_MIRROR_NO_DEFAULT_UPSTREAMS` | Disable default upstreams when no config (set to `1` or `true`). | — |
 
 Full reference: [docs/operations.md](docs/operations.md).
 
-## Example (APT format)
+### No config: default upstreams
 
-With **Docker**, run cache/publish via `docker exec repo-man repo-man <command> ...`; the server is already up. From **source**, run the CLI directly:
+If you **don’t provide a config file**, repo-man uses built-in **default upstreams** so clients can use the mirror immediately with minimal setup:
+
+| Path prefix | Format | Use in clients |
+|-------------|--------|----------------|
+| `/ubuntu` | APT | `deb http://HOST:8080/ubuntu noble main` (jammy, noble, noble-updates, noble-security) |
+| `/debian` | APT | `deb http://HOST:8080/debian bookworm main` (bookworm, bookworm-updates) |
+| `/rocky9` | RPM | `baseurl=http://HOST:8080/rocky9` (Rocky Linux 9 BaseOS) |
+| `/alpine` | Alpine | `http://HOST:8080/alpine` (Alpine 3.19 main) |
+
+To **disable** default upstreams (e.g. you only want upstreams from your own config): set **`REPO_MIRROR_NO_DEFAULT_UPSTREAMS=1`**, pass **`--no-default-upstreams`** to `repo-man serve`, or create a config file with **`disable_default_upstreams: true`**. Providing a config file that defines any upstreams also disables defaults (only your configured upstreams are used).
+
+## Example
+
+With **no config**, just run the server; default upstreams (Ubuntu, Debian, Rocky 9, Alpine) are used and clients can point at the path prefixes above.
+
+With **Docker**, run cache/publish via `docker exec repo-man repo-man <command> ...`; the server is already up. From **source**:
 
 ```bash
-# Add upstream, publish packages, serve (omit 'serve' when using Docker)
-repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ --layout classic --path-prefix /ubuntu/
+# Optional: add more upstreams or override defaults
+repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ --format apt --layout classic --path-prefix /ubuntu --suites noble --components main --archs amd64
 repo-man publish add --path-prefix /local/ ./pkg.deb
 repo-man serve --port 8080
 ```
