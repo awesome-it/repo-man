@@ -4,8 +4,8 @@ Runs repo-man in a local Kubernetes cluster (kind) and verifies that an APT clie
 
 ## Prerequisites
 
-- Docker
-- [kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker)
+- Docker **or** Podman
+- [kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker/Podman)
 - kubectl
 
 ## Run
@@ -13,6 +13,7 @@ Runs repo-man in a local Kubernetes cluster (kind) and verifies that an APT clie
 From the project root:
 
 ```bash
+# Uses Podman automatically when available, otherwise Docker.
 ./tests/k8s/run.sh
 ```
 

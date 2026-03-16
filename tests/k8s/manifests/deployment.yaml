@@ -21,9 +21,10 @@ spec:
         - name: repo-man
           image: repo-man:test
           imagePullPolicy: IfNotPresent
-          args:
-            - sh
+          command:
+            - /bin/sh
             - -c
+          args:
             - |
               if [ ! -f /data/config.yaml ]; then
                 repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ \
