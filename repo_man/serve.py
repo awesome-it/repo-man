@@ -9,9 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable
-from urllib.parse import unquote
 
-from repo_man.disk import free_disk_until_under_watermark
 from repo_man.formats.registry import get_backend
 from repo_man.metrics import (
     cache_requests_total,
@@ -25,6 +23,7 @@ from repo_man.metrics import (
     upstream_last_access_timestamp_seconds,
 )
 from repo_man.storage.base import StorageBackend
+from repo_man.repo_service import RepoService
 
 try:
     from repo_man.hash_store.base import PackageHashStore as _PackageHashStore
@@ -120,15 +119,18 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
             return
         if not self.upstreams:
             return
-        removed = free_disk_until_under_watermark(
+        # Delegate to RepoService helper (kept for backward compatibility)
+        service = RepoService(
             self.storage,
             self.upstreams,
+            self.local_prefixes,
+            self.metadata_ttl_seconds,
+            self.package_hash_store,
             self.disk_high_watermark_bytes,
             self.get_disk_usage_fn,
-            hash_store=self.package_hash_store,
+            self.keep_versions_per_package,
         )
-        if removed:
-            logger.info("Auto-pruned %s cached package(s) (disk over high watermark)", removed)
+        service.maybe_free_disk_over_watermark()
 
     def _path_prefix_to_storage_prefix(self, path_prefix: str) -> str | None:
         """Map request path prefix to storage prefix. Returns cache/name or local/name."""
@@ -152,37 +154,20 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 return u
         return None
 
-    def _get_storage_key(self, path: str) -> str | None:
-        path = unquote(path).strip("/")
-        if not path:
-            return None
-        if path == "metrics":
-            return "METRICS"
-        # Match shortest path_prefix so we get the full suffix for storage key
-        parts = path.split("/")
-        for i in range(1, len(parts) + 1):
-            prefix = "/" + "/".join(parts[:i])
-            storage_prefix = self._path_prefix_to_storage_prefix(prefix)
-            if storage_prefix:
-                suffix = "/".join(parts[i:]) if i < len(parts) else ""
-                if storage_prefix == "METRICS":
-                    return "METRICS"
-                key = f"{storage_prefix}/{suffix}" if suffix else storage_prefix
-                return key
-        return None
-
-    def _path_prefix_for_metrics(self) -> str:
-        path = (self.path or "").strip("/")
-        if path == "metrics":
-            return "/metrics"
-        parts = path.split("/")
-        return "/" + (parts[0] if parts else "")
-
     def do_GET(self) -> None:
-        path_prefix = self._path_prefix_for_metrics()
         start = time.perf_counter()
         try:
-            key = self._get_storage_key(self.path)
+            service = RepoService(
+                self.storage,
+                self.upstreams,
+                self.local_prefixes,
+                self.metadata_ttl_seconds,
+                self.package_hash_store,
+                self.disk_high_watermark_bytes,
+                self.get_disk_usage_fn,
+                self.keep_versions_per_package,
+            )
+            key, path_prefix = service.resolve(self.path)
             if key == "METRICS":
                 content = (_metrics_callback or _default_metrics)()
                 self.send_response(200)
@@ -199,26 +184,7 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
             data = self.storage.get(key)
             # If cached metadata is past TTL, treat as stale so we refetch (any path not a package file)
-            if (
-                data is not None
-                and key.startswith("cache/")
-                and self.metadata_ttl_seconds > 0
-            ):
-                if not (key.endswith(".deb") or key.endswith(".rpm") or key.endswith(".apk")):
-                    fetched_at_bytes = self.storage.get(key + ".fetched_at")
-                    if fetched_at_bytes is None:
-                        data = None
-                    else:
-                        try:
-                            fetched_at = float(fetched_at_bytes.decode("utf-8").strip())
-                            if time.time() - fetched_at > self.metadata_ttl_seconds:
-                                data = None
-                        except (ValueError, UnicodeDecodeError):
-                            data = None
-                    # So backend.get_or_fetch will refetch: remove stale cache entry
-                    if data is None:
-                        self.storage.delete(key)
-                        self.storage.delete(key + ".fetched_at")
+            data = service.maybe_refresh_metadata_ttl(key, data)
             served_from_upstream = False
             if data is None and key.startswith("cache/"):
                 parts = key.split("/", 2)
@@ -242,8 +208,8 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                         except ValueError:
                             pass
             if served_from_upstream:
-                self._maybe_prune_old_versions()
-                self._maybe_free_disk_over_watermark()
+                service.maybe_prune_old_versions()
+                service.maybe_free_disk_over_watermark()
             if data is None:
                 if key.startswith("cache/"):
                     cache_requests_total.labels(result="miss").inc()

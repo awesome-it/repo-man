@@ -1,6 +1,6 @@
 # Docker-based integration test
 
-Runs repo-man in Docker Compose with **APT**, **RPM**, and **Alpine** upstreams. Seeds Ubuntu (jammy, noble, noble-updates, noble-security), GitLab CE, Rocky 9 BaseOS (RPM), and Alpine 3.19 main. Client containers verify the mirror for each format and demonstrate cache pruning. Verifies pull-through cache (metadata and packages fetched from upstream on first request, then served from cache).
+Runs repo-man in Docker Compose with **APT**, **RPM**, and **Alpine** upstreams. Seeds Ubuntu (jammy, noble, noble-updates, noble-security), Rocky 9 BaseOS (RPM), and Alpine 3.19 main. Client containers verify the mirror for each format and demonstrate cache pruning. Verifies pull-through cache (metadata and packages fetched from upstream on first request, then served from cache).
 
 ## Prerequisites
 
@@ -52,10 +52,9 @@ To run only APT-related clients and skip RPM/Alpine, use the same compose file b
 
 **ubuntu-client** (Ubuntu 22.04 / jammy):
 
-1. Points APT at `http://repo-man:8080/ubuntu` (jammy main) and `http://repo-man:8080/gitlab-ce` (jammy main)
-2. Runs `apt-get update` (metadata is pulled through from archive.ubuntu.com and packages.gitlab.com)
-3. Runs `apt-get install -y vim`, then `vim --version`
-4. Runs `apt-get install -y gitlab-ce`, then `gitlab-ctl status` (or true)
+1. Points APT at `http://repo-man:8080/ubuntu` (jammy main)
+2. Runs `apt-get update` (metadata is pulled through from archive.ubuntu.com via repo-man)
+3. Runs `apt-get install -y vim curl`, then `vim --version` and `curl --version`
 
 **ubuntu-client-24** (Ubuntu 24.04 / noble):
 
