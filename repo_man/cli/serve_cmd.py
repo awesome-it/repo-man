@@ -34,12 +34,19 @@ def _config_path(ctx: click.Context):
     default=False,
     help="Disable default upstreams (Ubuntu, Debian, Rocky 9, Alpine). Use with config or REPO_MIRROR_NO_DEFAULT_UPSTREAMS.",
 )
+@click.option(
+    "--enable-api",
+    is_flag=True,
+    default=None,
+    help="Enable the REST API under /api/v1 (publish, health). Off by default. See REPO_MIRROR_ENABLE_API or config api.enable.",
+)
 @click.pass_context
 def serve(
     ctx: click.Context,
     bind: str,
     port: int,
     no_default_upstreams: bool,
+    enable_api: bool | None,
 ) -> None:
     """Run the HTTP server; serves repos by path prefix and /metrics. With no config, uses default upstreams."""
     repo_root = config_module.get_repo_root(ctx.obj.get("repo_root"))
@@ -56,6 +63,10 @@ def serve(
         )
     storage = LocalStorageBackend(repo_root)
     local_prefixes = []  # Could be from config later
+    api_enabled = enable_api if enable_api is not None else config_module.get_enable_api(config_path)
+    if api_enabled:
+        # Serve published content under /local so API-published repos are visible to clients
+        local_prefixes = ["/local"]
     metadata_ttl_seconds = config_module.get_metadata_ttl_seconds(config_path)
     store_type = config_module.get_package_hash_store_type(config_path)
     redis_url = config_module.get_redis_url(config_path)
@@ -67,6 +78,8 @@ def serve(
     disk_high_watermark_bytes = config_module.get_disk_high_watermark_bytes(config_path)
     get_disk_usage_fn = lambda: get_repo_disk_usage_bytes(repo_root)
     keep_versions_per_package = config_module.get_cache_versions_per_package()
+    if api_enabled:
+        click.echo("API enabled (/api/v1). Any client that can reach the API can publish; secure it externally.", err=True)
     click.echo(f"Serving on http://{bind}:{port}")
     run_server(
         bind,
@@ -79,4 +92,5 @@ def serve(
         disk_high_watermark_bytes=disk_high_watermark_bytes,
         get_disk_usage_fn=get_disk_usage_fn,
         keep_versions_per_package=keep_versions_per_package,
+        enable_api=api_enabled,
     )

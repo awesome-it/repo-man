@@ -7,23 +7,22 @@ import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable
 
 from repo_man.formats.registry import get_backend
 from repo_man.metrics import (
     cache_requests_total,
-    cache_upstream_fetch_errors_total,
     client_last_served_timestamp_seconds,
     client_packages_served_total,
     get_metrics_output,
     http_request_duration_seconds,
     http_requests_total,
     packages_served_total,
-    upstream_last_access_timestamp_seconds,
 )
 from repo_man.storage.base import StorageBackend
 from repo_man.repo_service import RepoService
+from repo_man.serve_asgi import handle_get_response
 
 try:
     from repo_man.hash_store.base import PackageHashStore as _PackageHashStore
@@ -82,6 +81,7 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
     disk_high_watermark_bytes: int | None = None  # when set, auto-prune cache when usage exceeds this
     get_disk_usage_fn: Callable[[], int] | None = None  # used with disk_high_watermark_bytes
     keep_versions_per_package: int = 0  # when > 0, auto-prune to keep this many versions per package after each cache write
+    enable_api: bool = False  # when True, /api/v1 (FastAPI) is enabled
 
     def _maybe_prune_old_versions(self) -> None:
         """Keep only the latest keep_versions_per_package versions per package for each upstream."""
@@ -155,9 +155,10 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
         return None
 
     def do_GET(self) -> None:
-        start = time.perf_counter()
         try:
-            service = RepoService(
+            status, headers, body = handle_get_response(
+                self.path,
+                self.client_address,
                 self.storage,
                 self.upstreams,
                 self.local_prefixes,
@@ -166,117 +167,26 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 self.disk_high_watermark_bytes,
                 self.get_disk_usage_fn,
                 self.keep_versions_per_package,
+                self.enable_api,
+                _metrics_callback or _default_metrics,
+                _get_client_id,
             )
-            key, path_prefix = service.resolve(self.path)
-            if key == "METRICS":
-                content = (_metrics_callback or _default_metrics)()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(content.encode("utf-8"))))
-                self.end_headers()
-                self.wfile.write(content.encode("utf-8"))
-                http_requests_total.labels(method="GET", path_prefix="/metrics", status="200").inc()
-                return
-            if key is None:
-                logger.debug("Not found: path_prefix=%s path=%s", path_prefix, self.path)
-                self.send_error(404, "Not found")
-                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-                return
-            data = self.storage.get(key)
-            # If cached metadata is past TTL, treat as stale so we refetch (any path not a package file)
-            data = service.maybe_refresh_metadata_ttl(key, data)
-            served_from_upstream = False
-            if data is None and key.startswith("cache/"):
-                parts = key.split("/", 2)
-                if len(parts) >= 3:
-                    upstream_id, suffix = parts[1], parts[2]
-                    upstream_config = next(
-                        (u for u in self.upstreams if u.get("name") == upstream_id),
-                        None,
-                    )
-                    if upstream_config:
-                        fmt = upstream_config.get("format", "apt")
-                        try:
-                            backend = get_backend(fmt)
-                            data, served_from_upstream = backend.get_or_fetch(
-                                upstream_id,
-                                suffix,
-                                upstream_config,
-                                self.storage,
-                                self.package_hash_store,
-                            )
-                        except ValueError:
-                            pass
-            if served_from_upstream:
-                service.maybe_prune_old_versions()
-                service.maybe_free_disk_over_watermark()
-            if data is None:
-                if key.startswith("cache/"):
-                    cache_requests_total.labels(result="miss").inc()
-                logger.debug("Not found: path_prefix=%s key=%s", path_prefix, key)
-                self.send_error(404, "Not found")
-                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-                return
-            if key.startswith("cache/"):
-                cache_requests_total.labels(result="hit" if not served_from_upstream else "miss").inc()
-            self.send_response(200)
-            if key.endswith(".gz"):
-                self.send_header("Content-Type", "application/gzip")
-            elif key.endswith(".deb"):
-                self.send_header("Content-Type", "application/vnd.debian.binary-package")
-            elif key.endswith(".rpm"):
-                self.send_header("Content-Type", "application/x-rpm")
-            elif key.endswith(".apk"):
-                self.send_header("Content-Type", "application/vnd.apk")
-            else:
-                self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_response(status)
+            for name, value in headers:
+                self.send_header(name, value)
             self.end_headers()
-            self.wfile.write(data)
-            http_requests_total.labels(method="GET", path_prefix=path_prefix, status="200").inc()
-            if key.endswith((".deb", ".rpm", ".apk")):
-                packages_served_total.labels(path_prefix=path_prefix).inc()
-                source = "upstream" if served_from_upstream else "cache"
-                logger.info("Served package: path_prefix=%s source=%s package=%s", path_prefix, source, key)
-                # Record last_served for watermark eviction (oldest-first drop)
-                if self.package_hash_store is not None:
-                    parts_key = key.split("/", 2)
-                    if len(parts_key) >= 3:
-                        self.package_hash_store.set_last_served(parts_key[1], parts_key[2], time.time())
-                # Track client in Prometheus only (client = IP or hostname from reverse DNS)
-                try:
-                    client_ip = self.client_address[0] if self.client_address else None
-                    if client_ip:
-                        client_id = _get_client_id(client_ip)
-                        now = time.time()
-                        client_packages_served_total.labels(client=client_id).inc()
-                        client_last_served_timestamp_seconds.labels(client=client_id).set(now)
-                except Exception:
-                    pass
-            else:
-                source = "upstream" if served_from_upstream else "cache"
-                if source == "cache" and key.startswith("cache/") and self.metadata_ttl_seconds > 0:
-                    fetched_at_bytes = self.storage.get(key + ".fetched_at")
-                    if fetched_at_bytes is not None:
-                        try:
-                            fetched_at = float(fetched_at_bytes.decode("utf-8").strip())
-                            expiry_at = fetched_at + self.metadata_ttl_seconds
-                            time_until_expiry = max(0.0, expiry_at - time.time())
-                            logger.info(
-                                "Served metadata from cache: path_prefix=%s key=%s time_until_expiry_seconds=%.0f",
-                                path_prefix,
-                                key,
-                                time_until_expiry,
-                            )
-                        except (ValueError, UnicodeDecodeError):
-                            logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
-                    else:
-                        logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
-                else:
-                    logger.info("Served metadata: path_prefix=%s source=%s key=%s", path_prefix, source, key)
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError) as e:
-            # Client closed the connection before we finished sending (e.g. apt/dnf cancelled)
             logger.debug("Client closed connection before response completed: %s", e)
+
+    def do_POST(self) -> None:
+        start = time.perf_counter()
+        path_prefix = (self.path or "").strip("/") or "/"
+        if not path_prefix.startswith("/"):
+            path_prefix = "/" + path_prefix
+        try:
+            self.send_error(404, "Not found")
+            http_requests_total.labels(method="POST", path_prefix=path_prefix, status="404").inc()
         finally:
             http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
 
@@ -296,23 +206,25 @@ def run_server(
     disk_high_watermark_bytes: int | None = None,
     get_disk_usage_fn: Callable[[], int] | None = None,
     keep_versions_per_package: int = 0,
+    enable_api: bool = False,
 ) -> None:
-    """Run HTTP server until interrupted."""
+    """Run ASGI server (uvicorn) until interrupted. /api/v1 is FastAPI; other paths serve repo and /metrics."""
+    import uvicorn
+    from repo_man.serve_asgi import make_asgi_app
     local_prefixes = local_prefixes or []
-    handler = type("Handler", (RepoHTTPRequestHandler,), {
-        "storage": storage,
-        "upstreams": upstreams,
-        "local_prefixes": local_prefixes,
-        "metadata_ttl_seconds": metadata_ttl_seconds,
-        "package_hash_store": package_hash_store,
-        "disk_high_watermark_bytes": disk_high_watermark_bytes,
-        "get_disk_usage_fn": get_disk_usage_fn,
-        "keep_versions_per_package": keep_versions_per_package,
-    })
-    server = HTTPServer((bind, port), handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        local_prefixes,
+        metadata_ttl_seconds,
+        package_hash_store,
+        disk_high_watermark_bytes,
+        get_disk_usage_fn,
+        keep_versions_per_package,
+        enable_api,
+        _metrics_callback or _default_metrics,
+        _get_client_id,
+    )
+    config = uvicorn.Config(app, host=bind, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    server.run()

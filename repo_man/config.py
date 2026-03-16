@@ -18,6 +18,7 @@ ENV_DISK_HIGH_WATERMARK_BYTES = "REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES"
 ENV_PACKAGE_HASH_STORE = "REPO_MIRROR_PACKAGE_HASH_STORE"
 ENV_REDIS_URL = "REPO_MIRROR_REDIS_URL"
 ENV_NO_DEFAULT_UPSTREAMS = "REPO_MIRROR_NO_DEFAULT_UPSTREAMS"
+ENV_ENABLE_API = "REPO_MIRROR_ENABLE_API"
 
 DEFAULT_CACHE_VERSIONS_PER_PACKAGE = 3
 DEFAULT_PACKAGE_HASH_STORE = "local"
@@ -113,6 +114,19 @@ def get_package_hash_store_type(config_path: Path | None = None) -> str:
             if s in ("redis", "local"):
                 return s
     return DEFAULT_PACKAGE_HASH_STORE
+
+
+def get_enable_api(config_path: Path | None = None) -> bool:
+    """Return True if the publish API should be enabled. Default False (API off by default)."""
+    value = os.environ.get(ENV_ENABLE_API)
+    if value is not None and str(value).strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if config_path and config_path.exists():
+        data = load_config_file(config_path)
+        api = data.get("api")
+        if isinstance(api, dict) and api.get("enable") is True:
+            return True
+    return False
 
 
 def get_redis_url(config_path: Path | None = None) -> str:
@@ -284,4 +298,5 @@ def get_effective_config(
         "upstreams": upstreams,
         "serve_bind": DEFAULT_SERVE_BIND,
         "serve_port": DEFAULT_SERVE_PORT,
+        "enable_api": get_enable_api(config_path),
     }

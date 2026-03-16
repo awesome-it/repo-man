@@ -196,8 +196,8 @@ def test_serve_metadata_ttl_invalidates_then_refetches(tmp_path: Path) -> None:
     handler.request_version = "HTTP/1.1"
     handler.wfile = wfile
 
-    # Patch get_backend where it is imported (serve module), not where it is defined.
-    with patch("repo_man.serve.get_backend", return_value=mock_backend):
+    # Patch get_backend where it is used (serve_asgi calls it from handle_get_response).
+    with patch("repo_man.serve_asgi.get_backend", return_value=mock_backend):
         handler.do_GET()
 
     out = wfile.getvalue()
@@ -207,3 +207,109 @@ def test_serve_metadata_ttl_invalidates_then_refetches(tmp_path: Path) -> None:
     mock_backend.get_or_fetch.assert_called_once()
     # Backend was invoked for the path; we do not assert on storage state to
     # avoid depending on implementation details of RepoService.
+
+
+def test_api_publish_disabled_returns_404(tmp_path: Path) -> None:
+    """POST /api/publish when API is disabled returns 404."""
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    handler_class = type(
+        "Handler",
+        (RepoHTTPRequestHandler,),
+        {
+            "storage": storage,
+            "upstreams": upstreams,
+            "local_prefixes": [],
+            "enable_api": False,
+        },
+    )
+    req = Mock()
+    req.makefile.return_value = BytesIO()
+    req.raw_requestline = b"POST /api/publish HTTP/1.1\r\n"
+    req.command = "POST"
+    req.path = "/api/publish"
+    req.client_address = ("127.0.0.1", 0)
+    req.requestline = "POST /api/publish HTTP/1.1"
+    req.headers = {}
+    req.rfile = BytesIO(b"")
+    wfile = BytesIO()
+    handler = handler_class(req, ("127.0.0.1", 0), None)
+    handler.path = "/api/publish"
+    handler.command = "POST"
+    handler.requestline = "POST /api/publish HTTP/1.1"
+    handler.request_version = "HTTP/1.1"
+    handler.wfile = wfile
+    handler.headers = {"Content-Length": "0"}
+    handler.do_POST()
+    out = wfile.getvalue()
+    assert b"404" in out
+
+
+def test_api_publish_enabled_accepts_multipart(tmp_path: Path) -> None:
+    """POST /api/v1/publish with valid multipart returns 200 and package is in storage."""
+    from fastapi.testclient import TestClient
+    from repo_man.api import create_api_app
+    storage = LocalStorageBackend(tmp_path)
+    app = create_api_app(storage)
+    client = TestClient(app)
+    files = {"packages": ("pkg_1.0_amd64.deb", b"fake deb bytes", "application/octet-stream")}
+    data = {
+        "path_prefix": "/local/",
+        "format": "apt",
+        "suite": "stable",
+        "component": "main",
+        "arch": "amd64",
+    }
+    fake_control = {
+        "Package": "pkg",
+        "Version": "1.0",
+        "Architecture": "amd64",
+    }
+    with patch("repo_man.formats.apt.publish.get_deb_control", return_value=fake_control):
+        response = client.post("/api/v1/publish", data=data, files=files)
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("published") == 1
+    assert "path_prefix" in body
+    assert storage.get("local/pool/main/amd64/pkg_1.0_amd64.deb") == b"fake deb bytes"
+    assert storage.get("local/dists/stable/Release") is not None
+    assert storage.get("local/dists/stable/main/binary-amd64/Packages") is not None
+
+
+def test_api_publish_missing_path_prefix_returns_400(tmp_path: Path) -> None:
+    """POST /api/v1/publish without path_prefix returns 422 (validation error)."""
+    from fastapi.testclient import TestClient
+    from repo_man.api import create_api_app
+    storage = LocalStorageBackend(tmp_path)
+    app = create_api_app(storage)
+    client = TestClient(app)
+    data = {"format": "apt"}
+    response = client.post("/api/v1/publish", data=data)
+    assert response.status_code == 422
+    detail = str(response.json().get("detail", []))
+    assert "path_prefix" in detail.lower()
+
+
+def test_asgi_app_routes_api_v1_health_when_enabled(tmp_path: Path) -> None:
+    """Full ASGI app with enable_api=True: GET /api/v1/health returns 200 (FastAPI wired)."""
+    from starlette.testclient import TestClient
+    from repo_man.serve_asgi import make_asgi_app
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        True,  # enable_api
+        None,   # metrics_callback
+        lambda x: x,  # get_client_id_fn
+    )
+    client = TestClient(app)
+    response = client.get("/api/v1/health")
+    assert response.status_code == 200
+    assert response.json().get("status") == "ok"

@@ -4,7 +4,7 @@ Human-readable documentation for repo-man: an extensible package repository mana
 
 | Document | Description |
 |----------|-------------|
-| [architecture.md](architecture.md) | High-level architecture, components, data flow, and extension points. |
+| [architecture.md](architecture.md) | High-level architecture, components, data flow, extension points, and **diagrams** (system context, request routing, storage layout, publish flow). |
 | [design-decisions.md](design-decisions.md) | Rationale for pull-through cache, metadata freshness, latest-N retention, storage/format abstraction, config, and Prometheus. |
 | [apt-repo-types.md](apt-repo-types.md) | APT format (included): repository kinds (classic Ubuntu/Debian/GitLab, Kubernetes, CRI-O, local) and layout types. |
 | [extension-guide.md](extension-guide.md) | How to add storage providers, package format types, or layout profiles. |

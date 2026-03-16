@@ -54,10 +54,22 @@ def publish_packages(
         return False
     # Generate Packages (plain and gzip)
     packages_content = generate_packages(stanzas)
+    packages_bytes = packages_content.encode("utf-8")
+    packages_gz_bytes = gzip.compress(packages_bytes)
     dists_base = f"{prefix}/dists/{suite}/{component}/binary-{arch}"
-    storage.put(f"{dists_base}/Packages", packages_content.encode("utf-8"))
-    storage.put(f"{dists_base}/Packages.gz", gzip.compress(packages_content.encode("utf-8")))
-    # Minimal Release for the suite
+    storage.put(f"{dists_base}/Packages", packages_bytes)
+    storage.put(f"{dists_base}/Packages.gz", packages_gz_bytes)
+    # Release file: paths relative to Release (dists/suite/)
+    rel_packages = f"{component}/binary-{arch}/Packages"
+    rel_packages_gz = f"{component}/binary-{arch}/Packages.gz"
+    md5_sums = {
+        rel_packages: (hashlib.md5(packages_bytes).hexdigest(), len(packages_bytes)),
+        rel_packages_gz: (hashlib.md5(packages_gz_bytes).hexdigest(), len(packages_gz_bytes)),
+    }
+    sha256_sums = {
+        rel_packages: (hashlib.sha256(packages_bytes).hexdigest(), len(packages_bytes)),
+        rel_packages_gz: (hashlib.sha256(packages_gz_bytes).hexdigest(), len(packages_gz_bytes)),
+    }
     release_content = generate_release(
         architectures=[arch],
         components=[component],
@@ -65,6 +77,8 @@ def publish_packages(
         codename=suite,
         origin="repo-man",
         label="repo-man",
+        md5_sums=md5_sums,
+        sha256_sums=sha256_sums,
     )
     storage.put(f"{prefix}/dists/{suite}/Release", release_content.encode("utf-8"))
     return True

@@ -1,5 +1,5 @@
 # Docker-based integration test: mirror Ubuntu (jammy + noble + updates/security), Rocky 9 BaseOS (RPM), and Alpine 3.19.
-# Clients: vim-three-versions (caches 2 vim .debs; serve auto-prunes to keep 1 — see logs), prune-demo (optional), ubuntu-client, ubuntu-client-24, rpm-client, alpine-client.
+# Clients: vim-three-versions (caches 2 vim .debs; serve auto-prunes to keep 1 — see logs), prune-demo (optional), ubuntu-client, ubuntu-client-24, rpm-client, alpine-client, build-publish-install-client (build .deb → publish via API → install).
 # Run: docker compose -f tests/docker/compose.integration.yaml up --build -d
 #       docker compose -f tests/docker/compose.integration.yaml run --rm vim-three-versions
 #       docker compose -f tests/docker/compose.integration.yaml run --rm prune-demo
@@ -20,7 +20,7 @@ services:
     volumes:
       - repo_data:/data
     entrypoint: ["sh", "-c"]
-    # Seed upstreams if config missing, then serve
+    # Seed upstreams if config missing, then serve with publish API enabled (for build-publish-install test)
     command:
       - |
         if [ ! -f /data/config.yaml ]; then
@@ -28,7 +28,7 @@ services:
         fi
         repo-man cache add-upstream --name rocky9 --url https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/ --format rpm --path-prefix /rocky9
         repo-man cache add-upstream --name alpine319 --url https://dl-cdn.alpinelinux.org/alpine/v3.19/main --format alpine --path-prefix /alpine319
-        exec repo-man serve --bind 0.0.0.0 --port 8080
+        exec repo-man serve --bind 0.0.0.0 --port 8080 --enable-api
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/metrics')"]
       interval: 2s
@@ -140,6 +140,43 @@ services:
         echo 'http://repo-man:8080/alpine319' >> /etc/apk/repositories
         apk add --no-cache musl
         musl --version || true
+
+  # Smoke test: GET /api/v1/health (repo-man started with --enable-api)
+  api-health-check:
+    image: alpine:3.19
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    command: ["sh", "-c", "wget -q -O- http://repo-man:8080/api/v1/health | grep -q '\"status\":\"ok\"' && echo OK"]
+
+  # Build a trivial .deb (at image build time), publish via API to repo-man, then client installs it (build → publish → install)
+  build-publish-install-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.build-publish
+    depends_on:
+      repo-man:
+        condition: service_healthy
+
+  build-publish-install-client:
+    image: ubuntu:24.04
+    depends_on:
+      repo-man:
+        condition: service_healthy
+      build-publish-install-builder:
+        condition: service_completed_successfully
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+    command:
+      - bash
+      - -ce
+      - |
+        echo 'deb [allow-insecure=yes] http://repo-man:8080/ubuntu noble main' > /etc/apt/sources.list
+        apt-get update -o Acquire::AllowInsecureRepositories=true -qq && apt-get install -y -qq curl
+        curl -fsS -o /tmp/hello-repoman_1.0_amd64.deb http://repo-man:8080/local/pool/main/amd64/hello-repoman_1.0_amd64.deb
+        dpkg -i /tmp/hello-repoman_1.0_amd64.deb
+        dpkg -l hello-repoman
+        echo "Build-publish-install OK"
 
 volumes:
   repo_data: {}

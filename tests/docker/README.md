@@ -31,6 +31,9 @@ docker compose -f tests/docker/compose.integration.yaml run --rm rpm-client
 
 # Alpine client — installs a package from repo-man mirror of Alpine 3.19 main
 docker compose -f tests/docker/compose.integration.yaml run --rm alpine-client
+
+# Build → publish → install: build a .deb, publish via API, install from local repo
+docker compose -f tests/docker/compose.integration.yaml run --rm build-publish-install-client
 ```
 
 ### APT-only (faster)
@@ -72,6 +75,12 @@ To run only APT-related clients and skip RPM/Alpine, use the same compose file b
 1. Adds `http://repo-man:8080/alpine319` to APK repositories (mirror of Alpine 3.19 main)
 2. Runs `apk add --no-cache musl` (pull-through from upstream)
 3. Exit 0 means the Alpine mirror worked
+
+**build-publish-install** (build → publish → install):
+
+1. **build-publish-install-builder**: Uses repo-man as APT source (noble main universe), installs `equivs` and `curl`, builds a trivial package `hello-repoman` with equivs-build, then publishes it via `POST /api/v1/publish` (repo-man must be started with `--enable-api`).
+2. **build-publish-install-client**: Depends on the builder; uses only `deb http://repo-man:8080/local stable main`, runs `apt-get update` and `apt-get install -y hello-repoman`, verifies the package is installed.
+3. Exit 0 means the full build → publish → install flow worked.
 
 Exit code 0 from each client means the mirror served that format successfully.
 

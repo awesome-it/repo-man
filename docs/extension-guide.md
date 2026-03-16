@@ -50,7 +50,7 @@ If a new APT layout appears (e.g. a variant of classic or single-stream):
 - **Format interface**: `repo_man/formats/base.py`  
 - **APT format**: `repo_man/formats/apt/` (cache, publish, metadata, version)  
 - **CLI**: `repo_man/cli/` (main, cache_cmd, publish_cmd, serve_cmd, config_cmd)  
-- **Serve**: `repo_man/serve.py` (path → storage key, metrics)  
+- **Serve**: `repo_man/serve.py`, `repo_man/serve_asgi.py` (ASGI app, path → storage key, metrics); `repo_man/repo_service.py` (RepoService)  
 - **Config**: `repo_man/config.py` (repo root, config file, upstreams, retention N)
 
 Storage and format are designed to be pluggable; the same serve and CLI layers work with any backend that implements the interfaces.

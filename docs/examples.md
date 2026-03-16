@@ -307,6 +307,29 @@ In CI, use a job that has Docker and kind (or k3d) available: create cluster, bu
 
 ---
 
+## 5. Publish from CI
+
+**Goal:** Build packages in CI (e.g. .deb, .rpm, .apk) and publish them to repo-man so that other jobs or machines can install them from the same server. Use the **publish API** so CI only needs HTTP access (no `docker exec` or SSH).
+
+**Prerequisites:** The REST API must be enabled: start repo-man with `--enable-api`, or set `REPO_MIRROR_ENABLE_API=1`, or set `api.enable: true` in config. **Any client that can reach the API can publish;** repo-man does not authenticate API requests. Secure the API externally (e.g. reverse proxy with auth, network policy so only CI can reach the API, or run repo-man in a private network).
+
+**Example (curl):** After building `my-pkg_1.0_amd64.deb`, publish to path prefix `/local/`:
+
+```bash
+curl -X POST \
+  -F path_prefix=/local/ \
+  -F format=apt \
+  -F suite=stable \
+  -F component=main \
+  -F arch=amd64 \
+  -F "packages=@my-pkg_1.0_amd64.deb" \
+  http://repo-man.example.com:8080/api/v1/publish
+```
+
+Success response: `{"published": 1, "path_prefix": "/local/", "changed": true}`. Clients can then use `deb http://repo-man.example.com:8080/local ./` in their sources.
+
+---
+
 ## See also
 
 - [Operations](operations.md) — config reference, metrics, disk watermark.

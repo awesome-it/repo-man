@@ -1,0 +1,10 @@
+# Build a trivial .deb at image build time (equivs), then at runtime we only publish via curl.
+FROM ubuntu:24.04 AS builder
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y equivs
+RUN printf 'Package: hello-repoman\nVersion: 1.0\nSection: misc\nArchitecture: amd64\nDescription: Test package for repo-man build-publish-install\n' > hello-repoman
+RUN equivs-build -f hello-repoman
+
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /hello-repoman_1.0_amd64.deb /hello-repoman_1.0_amd64.deb
+CMD ["sh", "-c", "curl -fsS -X POST -F path_prefix=/local/ -F format=apt -F suite=stable -F component=main -F arch=amd64 -F 'packages=@/hello-repoman_1.0_amd64.deb' http://repo-man:8080/api/v1/publish"]

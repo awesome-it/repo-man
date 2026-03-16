@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import time
 from typing import Any, Iterator
 
 
@@ -65,28 +66,29 @@ def generate_release(
     codename: str | None = None,
     origin: str = "repo-man",
     label: str = "repo-man",
-    md5_sums: dict[str, str] | None = None,
-    sha256_sums: dict[str, str] | None = None,
+    md5_sums: dict[str, tuple[str, int]] | None = None,
+    sha256_sums: dict[str, tuple[str, int]] | None = None,
 ) -> str:
     """Generate minimal Release file content."""
     codename = codename or suite
+    # RFC 2822 date so APT accepts the Release file
+    date_rfc2822 = time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())
     lines = [
         f"Origin: {origin}",
         f"Label: {label}",
         f"Suite: {suite}",
         f"Codename: {codename}",
+        f"Date: {date_rfc2822}",
         f"Architectures: {' '.join(architectures)}",
         f"Components: {' '.join(components)}",
         "Description: repo-man local/cache",
     ]
     if md5_sums:
         lines.append("MD5Sum:")
-        for path, h in md5_sums.items():
-            size = "0"  # optional
+        for path, (h, size) in md5_sums.items():
             lines.append(f" {h} {size} {path}")
     if sha256_sums:
         lines.append("SHA256:")
-        for path, h in sha256_sums.items():
-            size = "0"
+        for path, (h, size) in sha256_sums.items():
             lines.append(f" {h} {size} {path}")
     return "\n".join(lines) + "\n"

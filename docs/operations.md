@@ -16,6 +16,7 @@ Running repo-man in production: config reference, Prometheus metrics, and deploy
 | `REPO_MIRROR_PACKAGE_HASH_STORE` | Backend for package hash storage: `local` (SQLite under repo root) or `redis`. Used to detect when a cached package has changed on the remote; if so, the cache entry is dropped and a counter is incremented. | `local` |
 | `REPO_MIRROR_REDIS_URL` | Redis URL when `REPO_MIRROR_PACKAGE_HASH_STORE=redis`. | `redis://localhost:6379/0` |
 | `REPO_MIRROR_NO_DEFAULT_UPSTREAMS` | If set to `1`, `true`, or `yes`, disables built-in default upstreams when no config file (or empty upstreams) is present. | — |
+| `REPO_MIRROR_ENABLE_API` | If set to `1`, `true`, or `yes`, enables the REST API (`/api/v1` and legacy `POST /api/publish`). **Off by default.** See [Publish API](#publish-api) below. | — |
 
 ### Default upstreams (no config)
 
@@ -60,9 +61,62 @@ upstreams:
 # Optional: when repo size exceeds this (bytes), cache is pruned until under; published packages are kept
 disk:
   high_watermark_bytes: 10737418240   # 10 GiB
+
+# Optional: enable the REST API (/api/v1, legacy POST /api/publish). Off by default.
+# api:
+#   enable: true
 ```
 
 If `REPO_MIRROR_CONFIG` is not set, the CLI may default to `<REPO_MIRROR_REPO_ROOT>/config.yaml` when saving upstreams.
+
+## Publish API
+
+When enabled (via `REPO_MIRROR_ENABLE_API=1`, config `api.enable: true`, or `repo-man serve --enable-api`), the server exposes the REST API and accepts publish requests. **The API is off by default.**
+
+- **Preferred:** **`POST /api/v1/publish`** — versioned endpoint; same form fields and behaviour.
+- **Legacy:** **`POST /api/publish`** — deprecated; use `POST /api/v1/publish` instead. Still supported for compatibility.
+
+**Health check:** **`GET /api/v1/health`** returns `{"status": "ok"}` when the API is enabled.
+
+**Authentication:** Repo-man does not authenticate API requests. **Any connection that can reach the API is allowed to publish.** Securing the API is the deployer’s responsibility: use a reverse proxy with authentication, mTLS, network policies so only trusted clients can reach the API, or do not enable/expose the API.
+
+**Request:** `Content-Type: multipart/form-data`. Required form fields:
+
+- **path_prefix** (required) — Path prefix for the local repo (e.g. `/local/`).
+- **format** — `apt`, `rpm`, or `alpine`. Default `apt`.
+- **packages** or **files** — One or more package files (e.g. `.deb`, `.rpm`, `.apk`).
+
+Format-specific fields (optional):
+
+- **APT:** `suite` (default `stable`), `component` (default `main`), `arch` (default `amd64`).
+- **RPM:** `arch` (default `amd64`).
+- **Alpine:** `branch` (default `main`).
+
+**Response:** JSON. Success: `200` with `{"published": N, "path_prefix": "...", "changed": true|false}`. Error: `400` or `500` with `{"error": "..."}`.
+
+**Example (APT, curl):**
+
+```bash
+curl -X POST \
+  -F path_prefix=/local/ \
+  -F format=apt \
+  -F suite=stable \
+  -F component=main \
+  -F arch=amd64 \
+  -F "packages=@my-package_1.0_amd64.deb" \
+  http://repo-man.example.com:8080/api/v1/publish
+```
+
+**Example (RPM, curl):**
+
+```bash
+curl -X POST \
+  -F path_prefix=/local/ \
+  -F format=rpm \
+  -F arch=x86_64 \
+  -F "packages=@my-package-1.0-1.x86_64.rpm" \
+  http://repo-man.example.com:8080/api/v1/publish
+```
 
 ## Disk watermark
 
@@ -108,6 +162,7 @@ Endpoint: **`GET /metrics`** on the same HTTP server as the repo (same port).
 | `repo_man_prune_duration_seconds` | Histogram | - | Prune duration. |
 | `repo_man_prune_errors_total` | Counter | - | Prune errors. |
 | `repo_man_publish_uploads_total` | Counter | path_prefix | Packages published. |
+| `repo_man_publish_errors_total` | Counter | path_prefix | Publish errors. |
 | `repo_man_publish_duration_seconds` | Histogram | path_prefix | Publish duration. |
 | `repo_man_storage_operations_total` | Counter | operation, backend | Storage ops. |
 | `repo_man_storage_operation_duration_seconds` | Histogram | operation, backend | Storage op duration. |

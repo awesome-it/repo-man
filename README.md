@@ -3,7 +3,7 @@
 **Package repository manager** for the office, datacenter, or pipeline: **pull-through cache**, **self-publishing**, and **metrics** in one service. One HTTP endpoint for your network; pluggable formats and storage (APT included). [MIT License](LICENSE).
 
 - **Pull-through cache** — Packages and metadata are fetched from upstream on first request and cached; configurable latest-N retention and disk watermark. No full mirror, no wasted bandwidth.
-- **Self-publishing** — Ingest and serve your own packages (e.g. internal .deb) alongside cached upstreams under path prefixes you define.
+- **Self-publishing** — Ingest and serve your own packages (e.g. internal .deb) alongside cached upstreams under path prefixes you define. Publish via CLI or, when enabled, via the HTTP API (e.g. from CI). **The publish API is off by default.** Any client that can reach the API can publish; secure the API externally (e.g. reverse proxy, network policy, or do not expose the API).
 - **Metrics** — Prometheus `/metrics` on the same server: request counts, cache hit/miss, upstream fetch duration, prune and publish stats. **Client statistics** (packages served per client, last-served timestamp) let you see which hosts use the cache and alert when a host stops updating. See [docs/client-metrics.md](docs/client-metrics.md).
 
 ## Install (Docker, recommended)
@@ -20,10 +20,12 @@ docker run -d \
 ```
 
 - Listens on **http://localhost:8080**; Prometheus scrape target **http://localhost:8080/metrics**.
-- Add upstreams or publish packages via the CLI in the same container:
+- Add upstreams or publish packages via the CLI in the same container, or (if the API is enabled) via `POST /api/v1/publish`:
   ```bash
   docker exec repo-man repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ --layout classic --path-prefix /ubuntu --suites noble --components main --archs amd64
   docker exec repo-man repo-man publish add --path-prefix /local/ /path/on/host/pkg.deb   # copy .deb into container first, or use a bind mount
+  # Publish via API (start container with --enable-api or REPO_MIRROR_ENABLE_API=1):
+  curl -X POST -F path_prefix=/local/ -F format=apt -F suite=stable -F component=main -F arch=amd64 -F "packages=@pkg.deb" http://host:8080/api/v1/publish
   ```
 - Or use [Compose](compose.yaml): set the service image to `awesomeit/repo-man:latest`, then `docker compose up -d`. See [docs/examples.md](docs/examples.md) for more.
 
@@ -48,6 +50,7 @@ uv run pytest
 | `REPO_MIRROR_CONFIG` | Config file path (YAML/TOML). | — |
 | `CACHE_VERSIONS_PER_PACKAGE` | Latest N versions per package (retention). | 3 |
 | `REPO_MIRROR_NO_DEFAULT_UPSTREAMS` | Disable default upstreams when no config (set to `1` or `true`). | — |
+| `REPO_MIRROR_ENABLE_API` | Enable REST API (`/api/v1` publish, health). Set to `1` or `true`. **Off by default.** Any client that can reach the API can publish; secure it externally. | — |
 
 Full reference: [docs/operations.md](docs/operations.md).
 
@@ -75,6 +78,10 @@ With **Docker**, run cache/publish via `docker exec repo-man repo-man <command> 
 repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ --format apt --layout classic --path-prefix /ubuntu --suites noble --components main --archs amd64
 repo-man publish add --path-prefix /local/ ./pkg.deb
 repo-man serve --port 8080
+# With publish API enabled (for CI or remote publish):
+repo-man serve --port 8080 --enable-api
+# Publish via API (any client that can reach the API can publish; secure it externally):
+curl -X POST -F path_prefix=/local/ -F format=apt -F suite=stable -F component=main -F arch=amd64 -F "packages=@pkg.deb" http://localhost:8080/api/v1/publish
 ```
 
 Metrics are exposed on the same port: `GET /metrics` (Prometheus).

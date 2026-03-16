@@ -13,6 +13,7 @@ from repo_man.config import (
     get_disable_default_upstreams,
     get_effective_config,
     get_effective_upstreams,
+    get_enable_api,
     get_repo_root,
     load_config_file,
 )
@@ -43,11 +44,25 @@ def test_get_cache_versions_per_package_from_env(monkeypatch: pytest.MonkeyPatch
     assert get_cache_versions_per_package() == 5
 
 
+def test_get_enable_api_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPO_MIRROR_ENABLE_API", raising=False)
+    assert get_enable_api(None) is False
+    assert get_enable_api(Path("/nonexistent")) is False
+
+
+def test_get_enable_api_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPO_MIRROR_ENABLE_API", "1")
+    assert get_enable_api(None) is True
+    monkeypatch.setenv("REPO_MIRROR_ENABLE_API", "true")
+    assert get_enable_api(None) is True
+
+
 def test_get_effective_config() -> None:
     cfg = get_effective_config()
     assert "repo_root" in cfg
     assert "cache_versions_per_package" in cfg
     assert "upstreams" in cfg
+    assert "enable_api" in cfg
     assert isinstance(cfg["upstreams"], list)
 
 
