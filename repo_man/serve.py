@@ -156,9 +156,18 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
+            # Support reverse proxies by honoring X-Forwarded-For for client metrics.
+            forwarded_for: str | None = None
+            try:
+                hdrs = getattr(self, "headers", None)
+                if hdrs is not None:
+                    forwarded_for = hdrs.get("X-Forwarded-For")
+            except Exception:
+                forwarded_for = None
             status, headers, body = handle_get_response(
                 self.path,
                 self.client_address,
+                forwarded_for,
                 self.storage,
                 self.upstreams,
                 self.local_prefixes,
@@ -207,6 +216,7 @@ def run_server(
     get_disk_usage_fn: Callable[[], int] | None = None,
     keep_versions_per_package: int = 0,
     enable_api: bool = False,
+    access_log: bool = False,
 ) -> None:
     """Run ASGI server (uvicorn) until interrupted. /api/v1 is FastAPI; other paths serve repo and /metrics."""
     import uvicorn
@@ -225,6 +235,6 @@ def run_server(
         _metrics_callback or _default_metrics,
         _get_client_id,
     )
-    config = uvicorn.Config(app, host=bind, port=port, log_level="info")
+    config = uvicorn.Config(app, host=bind, port=port, log_level="info", access_log=access_log)
     server = uvicorn.Server(config)
     server.run()

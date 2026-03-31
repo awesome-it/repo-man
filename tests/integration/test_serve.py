@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from repo_man.serve import RepoHTTPRequestHandler
+from repo_man.serve_asgi import handle_get_response
 from repo_man.storage.local import LocalStorageBackend
 
 
@@ -91,6 +92,42 @@ def test_serve_deb_tracks_client_in_metrics(tmp_path: Path) -> None:
     assert "repo_man_client_packages_served_total" in metrics
     assert "repo_man_client_last_served_timestamp_seconds" in metrics
     assert client_ip in metrics
+
+
+def test_serve_deb_tracks_x_forwarded_for_in_metrics(tmp_path: Path) -> None:
+    """When X-Forwarded-For is set, use the first IP for per-client metrics."""
+    storage = LocalStorageBackend(tmp_path)
+    storage.put("cache/ubuntu/pool/main/v/vim/vim_1.0_amd64.deb", b"deb content")
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+
+    forwarded_ip = "203.0.113.77"
+    client_ip = "192.0.2.10"
+    # Ensure handle_get_response resolves this exact path to the cached key above.
+    path = "/ubuntu/pool/main/v/vim/vim_1.0_amd64.deb"
+
+    status, headers, body = handle_get_response(
+        path=path,
+        client_address=(client_ip, 4242),
+        forwarded_for=forwarded_ip,
+        storage=storage,
+        upstreams=upstreams,
+        local_prefixes=[],
+        metadata_ttl_seconds=0,
+        package_hash_store=None,
+        disk_high_watermark_bytes=None,
+        get_disk_usage_fn=None,
+        keep_versions_per_package=0,
+        enable_api=False,
+        metrics_callback=None,
+        get_client_id_fn=lambda ip: ip,
+    )
+
+    assert status == 200
+    assert b"deb content" in body
+    from repo_man.metrics import get_metrics_output
+
+    metrics = get_metrics_output()
+    assert forwarded_ip in metrics
 
 
 def test_serve_rpm_path_from_cache(tmp_path: Path) -> None:

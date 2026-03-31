@@ -12,7 +12,7 @@ Running repo-man in production: config reference, Prometheus metrics, and deploy
 | `REPO_MIRROR_CONFIG` | Path to config file (YAML/TOML). | None (optional) |
 | `CACHE_VERSIONS_PER_PACKAGE` | Keep latest N versions per package; applied automatically by the serve process after each cache write (and by `cache prune`). | 3 |
 | `REPO_MIRROR_METADATA_TTL_SECONDS` | Metadata cache TTL in seconds; cached metadata (Release, Packages.gz, etc.) is re-fetched from upstream when older than this. | 1800 (30 minutes) |
-| `REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES` | Repo disk high watermark; when exceeded, cache (not published) is pruned. | None (disabled) |
+| `REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES` | Repo disk high watermark; when exceeded, cache (not published) is pruned. Set to `off`, `none`, or `disabled` to disable. | 10 GiB |
 | `REPO_MIRROR_PACKAGE_HASH_STORE` | Backend for package hash storage: `local` (SQLite under repo root) or `redis`. Used to detect when a cached package has changed on the remote; if so, the cache entry is dropped and a counter is incremented. | `local` |
 | `REPO_MIRROR_REDIS_URL` | Redis URL when `REPO_MIRROR_PACKAGE_HASH_STORE=redis`. | `redis://localhost:6379/0` |
 | `REPO_MIRROR_NO_DEFAULT_UPSTREAMS` | If set to `1`, `true`, or `yes`, disables built-in default upstreams when no config file (or empty upstreams) is present. | — |
@@ -50,6 +50,17 @@ upstreams:
     url: https://pkgs.k8s.io/core:/stable:/v1.34/deb/
     layout: single-stream
     path_prefix: /k8s/v1.34
+  - name: ubuntu-esm-infra
+    url: https://esm.ubuntu.com/infra/ubuntu/
+    layout: classic
+    path_prefix: /ubuntu-esm-infra
+    suites: [jammy-infra-security, jammy-infra-updates]
+    components: [main]
+    archs: [amd64]
+    # Optional upstream auth (for protected upstreams such as ESM):
+    auth:
+      type: bearer
+      token_env: REPO_MIRROR_ESM_TOKEN
 
 # Optional: metadata cache TTL in seconds; cached metadata is re-fetched when older than this (default 1800)
 # metadata_ttl_seconds: 1800
@@ -66,6 +77,19 @@ disk:
 # api:
 #   enable: true
 ```
+
+### Upstream authentication
+
+For protected upstreams, define `auth` under each upstream in config:
+
+- **Bearer token** (recommended for ESM/API token flows):
+  - `auth.type: bearer`
+  - `auth.token_env: <ENV_VAR_NAME>` or `auth.token: <TOKEN>`
+- **Basic auth**:
+  - `auth.type: basic`
+  - `auth.username_env`, `auth.password_env` or `auth.username`/`auth.password`
+
+Using `*_env` avoids storing secrets in config files.
 
 If `REPO_MIRROR_CONFIG` is not set, the CLI may default to `<REPO_MIRROR_REPO_ROOT>/config.yaml` when saving upstreams.
 
@@ -119,6 +143,8 @@ curl -X POST \
 ```
 
 ## Disk watermark
+
+The disk high watermark defaults to **10 GiB**; override with `REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES` or `disk.high_watermark_bytes` in config. To disable size-based pruning, set the env to `off`, `none`, or `disabled`, or set `disk.high_watermark_bytes: null` in config.
 
 **Automatic pruning (serve process)**  
 After each cache write (pull-through of a package or metadata), the serve process:

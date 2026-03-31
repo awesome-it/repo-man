@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import os
 import time
 from functools import cmp_to_key
 from typing import Any
@@ -25,6 +26,47 @@ from repo_man.storage.base import StorageBackend
 
 def _storage_prefix(upstream_id: str) -> str:
     return f"cache/{upstream_id}"
+
+
+def _resolve_upstream_auth(
+    upstream_config: dict[str, Any] | None,
+) -> tuple[dict[str, str] | None, tuple[str, str] | None]:
+    """
+    Build request auth from upstream_config["auth"].
+    Supports:
+      - bearer: token or token_env
+      - basic: username/password or username_env/password_env
+    """
+    if not isinstance(upstream_config, dict):
+        return None, None
+    auth_cfg = upstream_config.get("auth")
+    if not isinstance(auth_cfg, dict):
+        return None, None
+
+    auth_type = str(auth_cfg.get("type", "")).strip().lower()
+    if auth_type == "bearer":
+        token = auth_cfg.get("token")
+        token_env = auth_cfg.get("token_env")
+        if not token and isinstance(token_env, str) and token_env.strip():
+            token = os.environ.get(token_env)
+        if isinstance(token, str) and token.strip():
+            return {"Authorization": f"Bearer {token.strip()}"}, None
+        return None, None
+
+    if auth_type == "basic":
+        username = auth_cfg.get("username")
+        password = auth_cfg.get("password")
+        username_env = auth_cfg.get("username_env")
+        password_env = auth_cfg.get("password_env")
+        if (username is None or username == "") and isinstance(username_env, str) and username_env.strip():
+            username = os.environ.get(username_env)
+        if (password is None or password == "") and isinstance(password_env, str) and password_env.strip():
+            password = os.environ.get(password_env)
+        if isinstance(username, str) and isinstance(password, str):
+            return None, (username, password)
+        return None, None
+
+    return None, None
 
 
 def parse_packages_for_hashes(raw: bytes) -> dict[str, str]:
@@ -64,12 +106,17 @@ def parse_packages_for_hashes(raw: bytes) -> dict[str, str]:
     return result
 
 
-def fetch_metadata_from_upstream(base_url: str, path: str) -> bytes | None:
+def fetch_metadata_from_upstream(
+    base_url: str,
+    path: str,
+    upstream_config: dict[str, Any] | None = None,
+) -> bytes | None:
     """Fetch a single file from upstream (e.g. Release, Packages.gz)."""
     url = base_url.rstrip("/") + "/" + path.lstrip("/")
+    headers, basic_auth = _resolve_upstream_auth(upstream_config)
     try:
         with httpx.Client(follow_redirects=True, timeout=30.0) as client:
-            r = client.get(url)
+            r = client.get(url, headers=headers, auth=basic_auth)
             if r.status_code == 200:
                 return r.content
             logger.warning("Metadata fetch failed: url=%s status=%s", url, r.status_code)
@@ -97,7 +144,7 @@ def cache_metadata(
         release_path = "Release"
     else:
         release_path = "dists/default/Release"  # placeholder; real path from suite/component/arch
-    content = fetch_metadata_from_upstream(base_url, release_path)
+    content = fetch_metadata_from_upstream(base_url, release_path, upstream_config)
     if content:
         storage.put(f"{prefix}/Release", content)
         upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
@@ -164,7 +211,7 @@ def get_or_fetch(
         data = get_or_fetch_package(upstream_id, relative_path, upstream_config, storage)
         return (data, data is not None)
     # Metadata path: fetch from upstream, store, optionally verify Packages hashes
-    raw = fetch_metadata_from_upstream(base_url, path_suffix)
+    raw = fetch_metadata_from_upstream(base_url, path_suffix, upstream_config)
     if raw is None:
         cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
         return (None, False)
@@ -201,9 +248,10 @@ def get_or_fetch_package(
         logger.warning("Package fetch skipped: upstream=%s path=%s no base_url", upstream_id, relative_path)
         return None
     url = base_url.rstrip("/") + "/" + relative_path.lstrip("/")
+    headers, basic_auth = _resolve_upstream_auth(upstream_config)
     try:
         with httpx.Client(follow_redirects=True, timeout=60.0) as client:
-            r = client.get(url)
+            r = client.get(url, headers=headers, auth=basic_auth)
             if r.status_code == 200:
                 storage.put(key, r.content)
                 packages_pulled_from_upstream_total.labels(upstream=upstream_id).inc()

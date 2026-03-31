@@ -20,6 +20,29 @@ Repo-man is format-extensible; APT is the first included format. This page descr
 - **Example**: `https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v1.32/deb/`
 - **Config**: Same as K8s: `--layout single-stream`, path prefix and name per version.
 
+## Ubuntu ESM Infra
+
+- **Layout**: Classic APT (`dists/<suite>/...` and `pool/...`), usually with suites like `jammy-infra-security` and `jammy-infra-updates`.
+- **Example**: `https://esm.ubuntu.com/infra/ubuntu/`
+- **Config**: Use `--layout classic` and a dedicated `path_prefix` (e.g. `/ubuntu-esm-infra`), plus upstream auth in config:
+
+```yaml
+upstreams:
+  - name: ubuntu-esm-infra
+    url: https://esm.ubuntu.com/infra/ubuntu/
+    layout: classic
+    path_prefix: /ubuntu-esm-infra
+    suites: [jammy-infra-security, jammy-infra-updates]
+    components: [main]
+    archs: [amd64]
+    auth:
+      type: bearer
+      token_env: REPO_MIRROR_ESM_TOKEN
+```
+
+Set `REPO_MIRROR_ESM_TOKEN` in the runtime environment.
+Alternatively, you can set `auth.token` directly in config when needed.
+
 ## Local / published
 
 - **Layout**: Same as classic; we generate `dists/` and `pool/` under a path prefix.

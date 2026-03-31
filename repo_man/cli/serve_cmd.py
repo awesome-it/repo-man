@@ -40,6 +40,11 @@ def _config_path(ctx: click.Context):
     default=None,
     help="Enable the REST API under /api/v1 (publish, health). Off by default. See REPO_MIRROR_ENABLE_API or config api.enable.",
 )
+@click.option(
+    "--access-log/--no-access-log",
+    default=False,
+    help="Enable/disable per-request uvicorn access logs (default: disabled).",
+)
 @click.pass_context
 def serve(
     ctx: click.Context,
@@ -47,6 +52,7 @@ def serve(
     port: int,
     no_default_upstreams: bool,
     enable_api: bool | None,
+    access_log: bool,
 ) -> None:
     """Run the HTTP server; serves repos by path prefix and /metrics. With no config, uses default upstreams."""
     repo_root = config_module.get_repo_root(ctx.obj.get("repo_root"))
@@ -93,4 +99,5 @@ def serve(
         get_disk_usage_fn=get_disk_usage_fn,
         keep_versions_per_package=keep_versions_per_package,
         enable_api=api_enabled,
+        access_log=access_log,
     )

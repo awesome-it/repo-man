@@ -76,6 +76,14 @@ apt-get update
 apt-get install <packages>
 ```
 
+Ubuntu Pro / ESM Infra via repo-man (example):
+
+```bash
+echo 'deb http://repo-man.example.com:8080/ubuntu-esm-infra jammy-infra-security main' > /etc/apt/sources.list.d/repo-man-esm-infra.list
+echo 'deb http://repo-man.example.com:8080/ubuntu-esm-infra jammy-infra-updates main' >> /etc/apt/sources.list.d/repo-man-esm-infra.list
+apt-get update
+```
+
 For HTTPS or signed repos, put the mirror’s certificate and use `deb https://...` as needed; repo-man serves HTTP by default.
 
 ### Optional: disk and retention
@@ -179,6 +187,72 @@ Either:
 ## 3. Compose setup for faster installs in build pipelines
 
 **Goal:** In a Compose-based build or test pipeline, many services run `apt-get update && apt-get install ...`. Use a **shared repo-man service** so the first run pulls from the internet and caches, and later services (and later pipeline runs) get packages from the cache. Speeds up Compose “build” and test steps.
+
+### Zero-modification Docker builds via DNS override
+
+If your build containers are based on Debian/Ubuntu and you want to avoid modifying Dockerfiles or container commands, run repo-man + CoreDNS on the build host and route APT hostnames to repo-man by DNS.
+
+1. Run the following stack on the build host:
+
+```yaml
+services:
+  repo-cache:
+    image: registry.awesome-it.de/upstream-dockerhub/awesomeit/repo-man:latest
+    ports:
+      - "127.0.0.1:80:8080"
+    restart: unless-stopped
+    dns:
+      - 1.1.1.1
+
+  coredns:
+    image: coredns/coredns:1.13.1
+    command: ["-conf", "/etc/coredns/Corefile"]
+    ports:
+      - "127.0.0.1:53:53/udp"
+      - "127.0.0.1:53:53/tcp"
+    configs:
+      - source: coredns_corefile
+        target: /etc/coredns/Corefile
+    restart: unless-stopped
+
+configs:
+  coredns_corefile:
+    content: |
+      .:53 {
+          log
+          errors
+          cache 300
+
+          hosts {
+              172.17.0.1 archive.ubuntu.com security.ubuntu.com
+              fallthrough
+          }
+
+          # Use your standard upstream resolver(s) here.
+          forward . 1.1.1.1 8.8.8.8
+      }
+```
+
+2. Point the Docker daemon on the build host to CoreDNS:
+
+```json
+{
+  "dns": ["127.0.0.1"]
+}
+```
+
+Then restart Docker. New containers will resolve `archive.ubuntu.com` / `security.ubuntu.com` to `172.17.0.1` (your local Docker host), which serves repo-man on port `80`.
+
+Notes:
+- Find the correct host gateway IP from a test container if needed:
+
+```bash
+docker run --rm alpine sh -c "ip route | awk '/default/ {print \$3}'"
+```
+
+- If your environment uses a different gateway address, replace `172.17.0.1` in the `hosts` block.
+- Keep `forward . ...` pointed at a shared/corporate upstream DNS resolver so all non-overridden domains continue to resolve normally.
+- If port `53` is already used on the host (for example by `systemd-resolved`), run CoreDNS on another address or free port `53` first.
 
 ### Layout
 

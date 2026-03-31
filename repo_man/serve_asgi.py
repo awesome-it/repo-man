@@ -26,6 +26,18 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _get_first_x_forwarded_for(forwarded_for: str | None) -> str | None:
+    """
+    Return the first IP from an X-Forwarded-For header value.
+
+    If header contains multiple entries (comma-separated), we treat the first as the original client.
+    """
+    if not forwarded_for:
+        return None
+    first = forwarded_for.split(",", 1)[0].strip()
+    return first or None
+
+
 def _error_response(status: int, message: str = "") -> tuple[int, list[tuple[str, str]], bytes]:
     body = (message or f"{status}").encode("utf-8")
     headers = [
@@ -38,6 +50,7 @@ def _error_response(status: int, message: str = "") -> tuple[int, list[tuple[str
 def handle_get_response(
     path: str,
     client_address: tuple[str, int] | None,
+    forwarded_for: str | None,
     storage: StorageBackend,
     upstreams: list[dict[str, Any]],
     local_prefixes: list[str],
@@ -152,7 +165,8 @@ def handle_get_response(
                     package_hash_store.set_last_served(parts_key[1], parts_key[2], time.time())
             if client_address:
                 try:
-                    client_id = get_client_id_fn(client_address[0])
+                    client_ip = _get_first_x_forwarded_for(forwarded_for) or client_address[0]
+                    client_id = get_client_id_fn(client_ip)
                     from repo_man.metrics import client_packages_served_total, client_last_served_timestamp_seconds
                     client_packages_served_total.labels(client=client_id).inc()
                     client_last_served_timestamp_seconds.labels(client=client_id).set(time.time())
@@ -201,12 +215,22 @@ def make_asgi_app(
             await _send_http_response(send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n")
             return
         client = scope.get("client") or ("", 0)
+        forwarded_for: str | None = None
+        # scope["headers"] is a list of (name, value) where both are bytes.
+        for name, value in (scope.get("headers") or []):
+            if name.lower() == b"x-forwarded-for":
+                try:
+                    forwarded_for = value.decode("latin-1").strip()  # headers are ASCII-ish
+                except Exception:
+                    forwarded_for = None
+                break
         loop = asyncio.get_running_loop()
         status, headers, body = await loop.run_in_executor(
             None,
             handle_get_response,
             path,
             client,
+            forwarded_for,
             storage,
             upstreams,
             local_prefixes,

@@ -23,6 +23,7 @@ ENV_ENABLE_API = "REPO_MIRROR_ENABLE_API"
 DEFAULT_CACHE_VERSIONS_PER_PACKAGE = 3
 DEFAULT_PACKAGE_HASH_STORE = "local"
 DEFAULT_METADATA_TTL_SECONDS = 1800  # 30 minutes
+DEFAULT_DISK_HIGH_WATERMARK_BYTES = 10 * 1024**3  # 10 GiB
 DEFAULT_SERVE_BIND = "0.0.0.0"
 DEFAULT_SERVE_PORT = 8080
 
@@ -63,6 +64,9 @@ def get_disk_high_watermark_bytes(config_path: Path | None = None) -> int | None
     """Return repo disk high watermark in bytes; when exceeded, cache (not published) may be pruned. None = disabled."""
     value = os.environ.get(ENV_DISK_HIGH_WATERMARK_BYTES)
     if value is not None and value.strip() != "":
+        s = value.strip().lower()
+        if s in ("0", "off", "none", "disabled"):
+            return None
         try:
             return max(0, int(value))
         except ValueError:
@@ -70,14 +74,15 @@ def get_disk_high_watermark_bytes(config_path: Path | None = None) -> int | None
     if config_path and config_path.exists():
         data = load_config_file(config_path)
         disk = data.get("disk")
-        if isinstance(disk, dict):
-            v = disk.get("high_watermark_bytes")
-            if v is not None:
-                try:
-                    return max(0, int(v))
-                except (ValueError, TypeError):
-                    pass
-    return None
+        if isinstance(disk, dict) and "high_watermark_bytes" in disk:
+            v = disk["high_watermark_bytes"]
+            if v is None:
+                return None
+            try:
+                return max(0, int(v))
+            except (ValueError, TypeError):
+                pass
+    return DEFAULT_DISK_HIGH_WATERMARK_BYTES
 
 
 def get_metadata_ttl_seconds(config_path: Path | None = None) -> int:
