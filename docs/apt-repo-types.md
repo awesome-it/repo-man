@@ -36,8 +36,9 @@ upstreams:
     components: [main]
     archs: [amd64]
     auth:
-      type: bearer
-      token_env: REPO_MIRROR_ESM_TOKEN
+      type: basic
+      username: bearer
+      password: token_here
 ```
 
 Set `REPO_MIRROR_ESM_TOKEN` in the runtime environment.

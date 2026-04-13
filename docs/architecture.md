@@ -13,7 +13,6 @@ flowchart LR
   subgraph clients [Package clients]
     APT[APT]
     DNF[DNF/RPM]
-    APK[apk]
   end
   subgraph repo_man [repo-man]
     HTTP[HTTP server :8080]
@@ -22,7 +21,6 @@ flowchart LR
     Ubuntu[Ubuntu]
     Debian[Debian]
     Rocky[Rocky]
-    Alpine[Alpine]
   end
   subgraph storage [Storage]
     Disk[(Repo root)]
@@ -34,7 +32,6 @@ flowchart LR
   HTTP -->|"cache miss"| Ubuntu
   HTTP -->|"cache miss"| Debian
   HTTP -->|"cache miss"| Rocky
-  HTTP -->|"cache miss"| Alpine
   HTTP -->|"store"| Disk
 ```
 
