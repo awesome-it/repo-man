@@ -6,8 +6,8 @@
 
 services:
   repo-man:
-    build: .
-    # image: awesomeit/repo-man:latest   # use this instead of build to run the pre-built image
+    # build: .
+    image: awesomeit/repo-man:latest
     ports:
       - "8080:8080"
     environment:

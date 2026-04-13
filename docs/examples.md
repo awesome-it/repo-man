@@ -28,6 +28,25 @@ upstreams:
     suites: [jammy, noble, noble-updates, noble-security]
     components: [main, universe]
     archs: [amd64]
+  # Password protected repos liek ubuntu-pro
+  # Note: Client access is not passwort protected anymore!
+  - name: ubuntu-esm-apps
+    url: https://esm.ubuntu.com/apps/ubuntu
+    base_url: https://esm.ubuntu.com/apps/ubuntu
+    layout: classic
+    path_prefix: /ubuntu_esm_apps
+    suites:
+    - jammy-apps-security
+    - jammy-apps-updates
+    components:
+    - main
+    archs:
+    - amd64
+    # Yes this is correct for ubuntu pro...
+    auth:
+      type: basic
+      username: bearer
+      password: <your login token here>
   - name: debian
     url: https://deb.debian.org/debian/
     layout: classic
@@ -41,24 +60,11 @@ disk:
   high_watermark_bytes: 10737418240   # 10 GiB
 ```
 
-### Seed and run
+### Run
 
 ```bash
 # One-time: create repo root and config
 export REPO_MIRROR_REPO_ROOT=/var/lib/repo-man
-mkdir -p "$REPO_MIRROR_REPO_ROOT"
-# ... copy or link config.yaml into $REPO_MIRROR_REPO_ROOT/config.yaml ...
-
-# Optional: pre-seed upstreams via CLI (or let them be created on first request)
-repo-man cache add-upstream --name ubuntu --url https://archive.ubuntu.com/ubuntu/ \
-  --layout classic --path-prefix /ubuntu --suites jammy,noble,noble-updates,noble-security \
-  --components main,universe --archs amd64
-repo-man cache add-upstream --name debian --url https://deb.debian.org/debian/ \
-  --layout classic --path-prefix /debian --suites bookworm,bookworm-updates \
-  --components main,contrib --archs amd64
-
-# Publish internal packages
-repo-man publish add --path-prefix /local/ /path/to/your-1.0.deb
 
 # Run server (systemd, Docker, or foreground)
 repo-man serve --bind 0.0.0.0 --port 8080
@@ -346,42 +352,7 @@ If you want upstreams to exist before any client request, use an entrypoint that
 
 ---
 
-## 4. Kubernetes integration test (kind)
-
-**Goal:** Run repo-man in a local Kubernetes cluster (e.g. [kind](https://kind.sigs.k8s.io/)) and verify that a client pod can install packages via the mirror. Useful for CI or local validation that the same image and config work in K8s.
-
-### Flow
-
-1. **Create cluster:** `kind create cluster` (or use k3d).
-2. **Build and load image:** Build the repo-man image, then `kind load docker-image repo-man:test`.
-3. **Deploy:** Apply a **Deployment** (repo-man with seed-upstream-then-serve) and a **Service** (ClusterIP on port 8080).
-4. **Run client Job:** A **Job** runs an Ubuntu (or other) container that points APT at `http://repo-man:8080/ubuntu`, runs `apt-get update && apt-get install -y <pkg>`, and exits 0 on success.
-5. **Tear down:** `kind delete cluster` (or leave the cluster for inspection).
-
-### Manifests and script
-
-Under `tests/k8s/`:
-
-- **manifests/deployment.yaml** — repo-man Deployment; entrypoint seeds Ubuntu upstream if config is missing, then runs `repo-man serve`.
-- **manifests/service.yaml** — Service so pods can reach repo-man at `http://repo-man:8080`.
-- **manifests/job-apt-client.yaml** — Job that runs Ubuntu, configures APT to use repo-man, and installs a package (e.g. vim).
-- **run.sh** — Script that builds the image, creates the kind cluster (if needed), loads the image, applies manifests, and waits for the Job to complete.
-
-Run from project root:
-
-```bash
-./tests/k8s/run.sh
-```
-
-The same image and config support APT, RPM, and Alpine; the example Job tests APT. You can add RPM or Alpine upstreams to the deployment and add corresponding client Jobs (e.g. Rocky or Alpine image with dnf/apk pointing at repo-man).
-
-### CI
-
-In CI, use a job that has Docker and kind (or k3d) available: create cluster, build and load image, apply manifests, run the client Job, then delete the cluster. Exit non-zero if the Job fails or times out.
-
----
-
-## 5. Publish from CI
+## 4. Publish from CI
 
 **Goal:** Build packages in CI (e.g. .deb, .rpm, .apk) and publish them to repo-man so that other jobs or machines can install them from the same server. Use the **publish API** so CI only needs HTTP access (no `docker exec` or SSH).
 

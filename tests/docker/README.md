@@ -29,16 +29,13 @@ docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client-2
 # RPM client (Rocky Linux 9) — installs a package from repo-man mirror of Rocky 9 BaseOS
 docker compose -f tests/docker/compose.integration.yaml run --rm rpm-client
 
-# Alpine client — installs a package from repo-man mirror of Alpine 3.19 main
-docker compose -f tests/docker/compose.integration.yaml run --rm alpine-client
-
 # Build → publish → install: build a .deb, publish via API, install from local repo
 docker compose -f tests/docker/compose.integration.yaml run --rm build-publish-install-client
 ```
 
 ### APT-only (faster)
 
-To run only APT-related clients and skip RPM/Alpine, use the same compose file but run only the APT services: `ubuntu-client`, `ubuntu-client-24`, `vim-three-versions`, `prune-demo`. The repo-man service still adds RPM and Alpine upstreams to config; to avoid that you would need a separate compose file or override the entrypoint (e.g. `compose.override.yaml` with a slimmer command).
+To run only APT-related clients and skip RPM, use the same compose file but run only the APT services: `ubuntu-client`, `ubuntu-client-24`, `vim-three-versions`, `prune-demo`. The repo-man service still adds RPM and Alpine upstreams to config; to avoid that you would need a separate compose file or override the entrypoint (e.g. `compose.override.yaml` with a slimmer command).
 
 **vim-three-versions** (simulate host with vim that does one update after another):
 
