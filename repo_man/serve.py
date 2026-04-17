@@ -219,7 +219,9 @@ def run_server(
     access_log: bool = False,
 ) -> None:
     """Run ASGI server (uvicorn) until interrupted. /api/v1 is FastAPI; other paths serve repo and /metrics."""
+    import copy
     import uvicorn
+    from uvicorn.config import LOGGING_CONFIG
     from repo_man.serve_asgi import make_asgi_app
     local_prefixes = local_prefixes or []
     app = make_asgi_app(
@@ -235,6 +237,20 @@ def run_server(
         _metrics_callback or _default_metrics,
         _get_client_id,
     )
-    config = uvicorn.Config(app, host=bind, port=port, log_level="info", access_log=access_log)
+    log_config = copy.deepcopy(LOGGING_CONFIG)
+    # Include timestamps on both application and access logs.
+    log_config["formatters"]["default"]["fmt"] = "%(asctime)s %(levelprefix)s %(message)s"
+    log_config["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+    log_config["formatters"]["access"]["fmt"] = "%(asctime)s %(levelprefix)s %(client_addr)s - \"%(request_line)s\" %(status_code)s"
+    log_config["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+
+    config = uvicorn.Config(
+        app,
+        host=bind,
+        port=port,
+        log_level="info",
+        access_log=access_log,
+        log_config=log_config,
+    )
     server = uvicorn.Server(config)
     server.run()

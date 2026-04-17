@@ -61,7 +61,8 @@ def main(
     """Linux package mirror and publishing tool (APT pull-through cache + local publish)."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
-        format="%(levelname)s: %(message)s",
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
