@@ -132,8 +132,8 @@ def handle_get_response(
                     except ValueError:
                         pass
         if served_from_upstream:
-            service.maybe_prune_old_versions()
-            service.maybe_free_disk_over_watermark()
+            # Prune/watermark maintenance runs in a background loop, not on request path.
+            pass
         if data is None:
             if key.startswith("cache/"):
                 cache_requests_total.labels(result="miss").inc()
@@ -200,6 +200,7 @@ def make_asgi_app(
     async def repo_asgi(scope: dict, receive: object, send: object) -> None:
         if scope.get("type") != "http":
             return
+        start = time.perf_counter()
         path = scope.get("path", "")
         method = scope.get("method", "GET")
         # Route /api/v1 and legacy /api/publish to FastAPI when API is enabled
@@ -213,6 +214,18 @@ def make_asgi_app(
             return
         if method != "GET":
             await _send_http_response(send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n")
+            return
+        # Fast-path /metrics so it does not depend on worker thread availability.
+        if path == "/metrics":
+            content = (metrics_callback or get_metrics_output)()
+            body = content.encode("utf-8")
+            headers = [
+                ("Content-Type", "text/plain; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+            ]
+            http_requests_total.labels(method="GET", path_prefix="/metrics", status="200").inc()
+            http_request_duration_seconds.labels(path_prefix="/metrics").observe(time.perf_counter() - start)
+            await _send_http_response(send, 200, headers, body)
             return
         client = scope.get("client") or ("", 0)
         forwarded_for: str | None = None

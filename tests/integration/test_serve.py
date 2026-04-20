@@ -350,3 +350,66 @@ def test_asgi_app_routes_api_v1_health_when_enabled(tmp_path: Path) -> None:
     response = client.get("/api/v1/health")
     assert response.status_code == 200
     assert response.json().get("status") == "ok"
+
+
+def test_asgi_metrics_fast_path_does_not_use_worker_handler(tmp_path: Path) -> None:
+    """GET /metrics should be served directly (not through handle_get_response)."""
+    from starlette.testclient import TestClient
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    with patch("repo_man.serve_asgi.handle_get_response", side_effect=AssertionError("should not be called")):
+        client = TestClient(app)
+        response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "repo_man_" in response.text or "# HELP" in response.text
+
+
+def test_handle_get_response_no_prune_or_watermark_on_request_path(tmp_path: Path) -> None:
+    """Even on upstream fetch miss, request path does not run maintenance routines."""
+    from repo_man.serve_asgi import handle_get_response
+
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu", "format": "apt", "url": "https://example.com/ubuntu/"}]
+    mock_backend = Mock()
+    mock_backend.get_or_fetch.return_value = (b"inrelease", True)
+
+    with patch("repo_man.serve_asgi.get_backend", return_value=mock_backend), patch(
+        "repo_man.serve_asgi.RepoService.maybe_prune_old_versions",
+        side_effect=AssertionError("prune should not run on request path"),
+    ), patch(
+        "repo_man.serve_asgi.RepoService.maybe_free_disk_over_watermark",
+        side_effect=AssertionError("watermark should not run on request path"),
+    ):
+        status, _, body = handle_get_response(
+            path="/ubuntu/dists/jammy/InRelease",
+            client_address=("127.0.0.1", 12345),
+            forwarded_for=None,
+            storage=storage,
+            upstreams=upstreams,
+            local_prefixes=[],
+            metadata_ttl_seconds=0,
+            package_hash_store=None,
+            disk_high_watermark_bytes=None,
+            get_disk_usage_fn=None,
+            keep_versions_per_package=3,
+            enable_api=False,
+            metrics_callback=None,
+            get_client_id_fn=lambda ip: ip,
+        )
+    assert status == 200
+    assert body == b"inrelease"

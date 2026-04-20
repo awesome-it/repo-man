@@ -38,6 +38,7 @@ _cache_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="repo_man_reverse_dns")
 
 _REVERSE_LOOKUP_TIMEOUT = 1.0
+_MAINTENANCE_INTERVAL_SECONDS = 30.0
 
 
 def _reverse_lookup(ip: str) -> None:
@@ -59,6 +60,38 @@ def _get_client_id(ip: str) -> str:
         _reverse_dns_cache[ip] = ip
     _executor.submit(_reverse_lookup, ip)
     return ip
+
+
+def _maintenance_loop(
+    stop_event: threading.Event,
+    storage: StorageBackend,
+    upstreams: list[dict[str, Any]],
+    local_prefixes: list[str],
+    metadata_ttl_seconds: int,
+    package_hash_store: _PackageHashStore | None,
+    disk_high_watermark_bytes: int | None,
+    get_disk_usage_fn: Callable[[], int] | None,
+    keep_versions_per_package: int,
+) -> None:
+    """Run prune/watermark maintenance outside the request path."""
+    while not stop_event.wait(_MAINTENANCE_INTERVAL_SECONDS):
+        try:
+            service = RepoService(
+                storage,
+                upstreams,
+                local_prefixes,
+                metadata_ttl_seconds,
+                package_hash_store,
+                disk_high_watermark_bytes,
+                get_disk_usage_fn,
+                keep_versions_per_package,
+            )
+            if keep_versions_per_package > 0:
+                service.maybe_prune_old_versions()
+            if disk_high_watermark_bytes is not None and get_disk_usage_fn is not None:
+                service.maybe_free_disk_over_watermark()
+        except Exception as e:
+            logger.warning("Background maintenance failed: %s", e)
 
 
 def set_metrics_callback(cb: Callable[[], str] | None = None) -> None:
@@ -237,6 +270,28 @@ def run_server(
         _metrics_callback or _default_metrics,
         _get_client_id,
     )
+    maintenance_stop = threading.Event()
+    maintenance_thread: threading.Thread | None = None
+    if keep_versions_per_package > 0 or (
+        disk_high_watermark_bytes is not None and get_disk_usage_fn is not None
+    ):
+        maintenance_thread = threading.Thread(
+            target=_maintenance_loop,
+            args=(
+                maintenance_stop,
+                storage,
+                upstreams,
+                local_prefixes,
+                metadata_ttl_seconds,
+                package_hash_store,
+                disk_high_watermark_bytes,
+                get_disk_usage_fn,
+                keep_versions_per_package,
+            ),
+            name="repo_man_maintenance",
+            daemon=True,
+        )
+        maintenance_thread.start()
     log_config = copy.deepcopy(LOGGING_CONFIG)
     # Include timestamps on both application and access logs.
     log_config["formatters"]["default"]["fmt"] = "%(asctime)s %(levelprefix)s %(message)s"
@@ -253,4 +308,9 @@ def run_server(
         log_config=log_config,
     )
     server = uvicorn.Server(config)
-    server.run()
+    try:
+        server.run()
+    finally:
+        maintenance_stop.set()
+        if maintenance_thread is not None:
+            maintenance_thread.join(timeout=2.0)
