@@ -3,6 +3,8 @@
 A simple yet flexible and modern Linux repository pull-through cache and local repo server.
 [MIT License](LICENSE).
 
+> **Development is internal; GitHub is a read-only mirror.** Issues and pull requests opened here are not monitored.
+
 - **Pull-through cache** — Packages and metadata are fetched from upstream on first request and cached; configurable latest-N retention and disk watermark. No full mirror, no wasted bandwidth.
 - **Self-publishing** — Ingest and serve your own packages (e.g. internal .deb) alongside cached upstreams under path prefixes you define. Publish via CLI or, when enabled, via the HTTP API (e.g. from CI).
 - **Metrics** — Prometheus `/metrics` included: request counts, cache hit/miss, upstream fetch duration, prune and publish stats.
@@ -94,3 +96,19 @@ docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client
 ```
 
 See [tests/docker/README.md](tests/docker/README.md) for details.
+
+## Support
+
+**Only the latest release is supported.** No patches or backports are made to older versions.
+
+The latest image is always available on Docker Hub as `awesomeit/repo-man:latest`.
+
+### SBOM
+
+To generate a Software Bill of Materials for the current image:
+
+```bash
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  anchore/syft:latest awesomeit/repo-man
+```

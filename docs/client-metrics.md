@@ -6,10 +6,10 @@ repo-man exposes **per-client metrics** so you can see which hosts are using the
 
 All metrics are exposed on `GET /metrics` (same HTTP server as the repo). Client metrics are updated when a **package file** (e.g. a `.deb`) is served to a client; metadata requests (Release, Packages) do **not** update client stats.
 
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `repo_man_client_packages_served_total` | Counter | `client` | Total number of packages served to each client. |
-| `repo_man_client_last_served_timestamp_seconds` | Gauge | `client` | Unix timestamp (seconds) when the last package was served to each client. |
+| Metric                                          | Type    | Labels   | Description                                                               |
+|-------------------------------------------------|---------|----------|---------------------------------------------------------------------------|
+| `repo_man_client_packages_served_total`         | Counter | `client` | Total number of packages served to each client.                           |
+| `repo_man_client_last_served_timestamp_seconds` | Gauge   | `client` | Unix timestamp (seconds) when the last package was served to each client. |
 
 - **`client`** is either the client’s **IP address** or, when available, its **reverse-DNS hostname** (see [Client identity](#client-identity) below).
 - Each label value is one “client” (one host or IP). Over time you see which clients have used the cache and when they last did.
