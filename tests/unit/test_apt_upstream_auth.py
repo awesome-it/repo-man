@@ -167,3 +167,65 @@ def test_fetch_metadata_without_auth_when_token_missing(monkeypatch: Any) -> Non
     assert data == b"ok"
     assert captured["headers"] is None
     assert captured["auth"] is None
+
+
+def test_fetch_metadata_uses_meta_release_base_url_for_meta_release_files(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def __enter__(self) -> "_Client":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            return None
+
+        def get(self, url: str, headers: dict[str, str] | None = None, auth: Any = None) -> _DummyResponse:
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["auth"] = auth
+            return _DummyResponse()
+
+    monkeypatch.setattr(apt_cache.httpx, "Client", _Client)
+
+    data = apt_cache.fetch_metadata_from_upstream(
+        "http://archive.ubuntu.com/ubuntu/",
+        "meta-release-lts",
+        {"meta_release_base_url": "https://changelogs.ubuntu.com/"},
+    )
+
+    assert data == b"ok"
+    assert captured["url"] == "https://changelogs.ubuntu.com/meta-release-lts"
+    assert captured["headers"] is None
+    assert captured["auth"] is None
+
+
+def test_fetch_metadata_uses_primary_base_url_for_non_meta_release_files(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def __enter__(self) -> "_Client":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            return None
+
+        def get(self, url: str, headers: dict[str, str] | None = None, auth: Any = None) -> _DummyResponse:
+            captured["url"] = url
+            return _DummyResponse()
+
+    monkeypatch.setattr(apt_cache.httpx, "Client", _Client)
+
+    data = apt_cache.fetch_metadata_from_upstream(
+        "http://archive.ubuntu.com/ubuntu/",
+        "dists/jammy/Release",
+        {"meta_release_base_url": "https://changelogs.ubuntu.com/"},
+    )
+
+    assert data == b"ok"
+    assert captured["url"] == "http://archive.ubuntu.com/ubuntu/dists/jammy/Release"

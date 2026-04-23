@@ -24,7 +24,7 @@ services:
     command:
       - |
         if [ ! -f /data/config.yaml ]; then
-          repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ --format apt --layout classic --path-prefix /ubuntu --suites jammy,noble,noble-updates,noble-security --components main --archs amd64
+          repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ --format apt --layout classic --path-prefix /ubuntu --suites jammy,jammy-updates,jammy-security,noble,noble-updates,noble-security --components main --archs amd64
         fi
         repo-man cache add-upstream --name rocky9 --url https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/ --format rpm --path-prefix /rocky9
         repo-man cache add-upstream --name alpine319 --url https://dl-cdn.alpinelinux.org/alpine/v3.19/main --format alpine --path-prefix /alpine319

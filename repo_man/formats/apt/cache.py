@@ -106,13 +106,29 @@ def parse_packages_for_hashes(raw: bytes) -> dict[str, str]:
     return result
 
 
+def _resolve_metadata_base_url(
+    base_url: str,
+    path: str,
+    upstream_config: dict[str, Any] | None,
+) -> str:
+    """Select upstream base URL for metadata path."""
+    normalized_path = path.lstrip("/")
+    if normalized_path.startswith("meta-release"):
+        if isinstance(upstream_config, dict):
+            override = upstream_config.get("meta_release_base_url")
+            if isinstance(override, str) and override.strip():
+                return override.strip()
+    return base_url
+
+
 def fetch_metadata_from_upstream(
     base_url: str,
     path: str,
     upstream_config: dict[str, Any] | None = None,
 ) -> bytes | None:
     """Fetch a single file from upstream (e.g. Release, Packages.gz)."""
-    url = base_url.rstrip("/") + "/" + path.lstrip("/")
+    effective_base_url = _resolve_metadata_base_url(base_url, path, upstream_config)
+    url = effective_base_url.rstrip("/") + "/" + path.lstrip("/")
     headers, basic_auth = _resolve_upstream_auth(upstream_config)
     try:
         with httpx.Client(follow_redirects=True, timeout=30.0) as client:

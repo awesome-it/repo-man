@@ -1,6 +1,6 @@
 # Docker-based integration test
 
-Runs repo-man in Docker Compose with **APT**, **RPM**, and **Alpine** upstreams. Seeds Ubuntu (jammy, noble, noble-updates, noble-security), Rocky 9 BaseOS (RPM), and Alpine 3.19 main. Client containers verify the mirror for each format and demonstrate cache pruning. Verifies pull-through cache (metadata and packages fetched from upstream on first request, then served from cache).
+Runs repo-man in Docker Compose with **APT**, **RPM**, and **Alpine** upstreams. Seeds Ubuntu (jammy, jammy-updates, jammy-security, noble, noble-updates, noble-security), Rocky 9 BaseOS (RPM), and Alpine 3.19 main. Client containers verify the mirror for each format and demonstrate cache pruning. Verifies pull-through cache (metadata and packages fetched from upstream on first request, then served from cache).
 
 ## Prerequisites
 

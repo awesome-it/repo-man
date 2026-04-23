@@ -22,7 +22,7 @@ Running repo-man in production: config reference, Prometheus metrics, and deploy
 
 When **no config file exists** (or the config file has no `upstreams`), repo-man uses **built-in default upstreams** so clients can use the mirror with minimal setup:
 
-- **APT** — `/ubuntu` (Ubuntu jammy, noble, noble-updates, noble-security), `/debian` (Debian bookworm, bookworm-updates)
+- **APT** — `/ubuntu` (Ubuntu jammy, jammy-updates, jammy-security, noble, noble-updates, noble-security), `/debian` (Debian bookworm, bookworm-updates)
 - **RPM** — `/rocky9` (Rocky Linux 9 BaseOS x86_64)
 - **Alpine** — `/alpine` (Alpine 3.19 main)
 
@@ -41,6 +41,8 @@ To **disable** default upstreams (e.g. you want to define only your own upstream
 upstreams:
   - name: ubuntu
     url: https://archive.ubuntu.com/ubuntu/
+    # Optional: where meta-release metadata is fetched from (used by do-release-upgrade)
+    meta_release_base_url: https://changelogs.ubuntu.com/
     layout: classic
     path_prefix: /ubuntu
     suites: [jammy]
@@ -92,6 +94,21 @@ For protected upstreams, define `auth` under each upstream in config:
 Using `*_env` avoids storing secrets in config files.
 
 If `REPO_MIRROR_CONFIG` is not set, the CLI may default to `<REPO_MIRROR_REPO_ROOT>/config.yaml` when saving upstreams.
+
+### do-release-upgrade via mirror
+
+To keep LTS upgrades on the same mirror host, point Ubuntu's release upgrader metadata to repo-man:
+
+```bash
+# Use LTS-to-LTS prompts
+sudo sed -i 's/^Prompt=.*/Prompt=lts/' /etc/update-manager/release-upgrades
+
+# Fetch release metadata through repo-man (replace HOST:8080)
+sudo sed -i 's#^URI=.*#URI=http://HOST:8080/ubuntu/meta-release#' /etc/update-manager/meta-release
+sudo sed -i 's#^URI_LTS=.*#URI_LTS=http://HOST:8080/ubuntu/meta-release-lts#' /etc/update-manager/meta-release
+```
+
+Then run `sudo do-release-upgrade`.
 
 ## Publish API
 

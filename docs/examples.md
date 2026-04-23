@@ -23,9 +23,10 @@ Save as `config.yaml` in your repo data directory (e.g. `/var/lib/repo-man/confi
 upstreams:
   - name: ubuntu
     url: https://archive.ubuntu.com/ubuntu/
+    meta_release_base_url: https://changelogs.ubuntu.com/
     layout: classic
     path_prefix: /ubuntu
-    suites: [jammy, noble, noble-updates, noble-security]
+    suites: [jammy, jammy-updates, jammy-security, noble, noble-updates, noble-security]
     components: [main, universe]
     archs: [amd64]
   # Password protected repos liek ubuntu-pro

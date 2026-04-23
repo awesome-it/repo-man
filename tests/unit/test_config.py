@@ -82,6 +82,25 @@ def test_get_default_upstreams() -> None:
     prefixes = {u.get("path_prefix") for u in defaults}
     assert "/ubuntu" in prefixes
     assert "/debian" in prefixes
+    ubuntu = next((u for u in defaults if u.get("name") == "ubuntu"), None)
+    assert ubuntu is not None
+    assert ubuntu.get("meta_release_base_url") == "https://changelogs.ubuntu.com/"
+
+
+def test_default_ubuntu_suites_cover_lts_upgrade_22_04_to_24_04() -> None:
+    defaults = get_default_upstreams()
+    ubuntu = next((u for u in defaults if u.get("name") == "ubuntu"), None)
+    assert ubuntu is not None
+    suites = set(ubuntu.get("suites", []))
+    expected = {
+        "jammy",
+        "jammy-updates",
+        "jammy-security",
+        "noble",
+        "noble-updates",
+        "noble-security",
+    }
+    assert expected.issubset(suites)
 
 
 def test_get_effective_upstreams_no_config_uses_defaults(tmp_path: Path) -> None:
