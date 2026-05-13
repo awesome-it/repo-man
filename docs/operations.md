@@ -110,6 +110,8 @@ sudo sed -i 's#^URI_LTS=.*#URI_LTS=http://HOST:8080/ubuntu/meta-release-lts#' /e
 
 Then run `sudo do-release-upgrade`.
 
+Only **GET** and **scoped HEAD** are served for repo paths: HEAD is accepted for `do-release-upgrade` metadata (paths under the dist-upgrader tree and for `meta-release` / `meta-release-lts` at the end of the URL); other HEAD requests return 404.
+
 ## Publish API
 
 When enabled (via `REPO_MIRROR_ENABLE_API=1`, config `api.enable: true`, or `repo-man serve --enable-api`), the server exposes the REST API and accepts publish requests. **The API is off by default.**

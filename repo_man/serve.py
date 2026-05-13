@@ -20,6 +20,7 @@ from repo_man.metrics import (
     http_requests_total,
     packages_served_total,
 )
+from repo_man.http_upgrade_paths import is_do_release_upgrade_head_path
 from repo_man.storage.base import StorageBackend
 from repo_man.repo_service import RepoService
 from repo_man.serve_asgi import handle_get_response
@@ -218,6 +219,51 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug("Client closed connection before response completed: %s", e)
+
+    def do_HEAD(self) -> None:
+        """Scoped HEAD for do-release-upgrade paths only (see ``http_upgrade_paths``)."""
+        if not is_do_release_upgrade_head_path(self.path or ""):
+            start = time.perf_counter()
+            path_prefix = (self.path or "").strip("/") or "/"
+            if not path_prefix.startswith("/"):
+                path_prefix = "/" + path_prefix
+            try:
+                self.send_error(404, "Not found")
+                http_requests_total.labels(method="HEAD", path_prefix=path_prefix, status="404").inc()
+            finally:
+                http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
+            return
+        try:
+            forwarded_for: str | None = None
+            try:
+                hdrs = getattr(self, "headers", None)
+                if hdrs is not None:
+                    forwarded_for = hdrs.get("X-Forwarded-For")
+            except Exception:
+                forwarded_for = None
+            status, headers, body = handle_get_response(
+                self.path,
+                self.client_address,
+                forwarded_for,
+                self.storage,
+                self.upstreams,
+                self.local_prefixes,
+                self.metadata_ttl_seconds,
+                self.package_hash_store,
+                self.disk_high_watermark_bytes,
+                self.get_disk_usage_fn,
+                self.keep_versions_per_package,
+                self.enable_api,
+                _metrics_callback or _default_metrics,
+                _get_client_id,
+                http_method="HEAD",
+            )
+            self.send_response(status)
+            for name, value in headers:
+                self.send_header(name, value)
+            self.end_headers()
         except (BrokenPipeError, ConnectionResetError) as e:
             logger.debug("Client closed connection before response completed: %s", e)
 

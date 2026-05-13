@@ -413,3 +413,184 @@ def test_handle_get_response_no_prune_or_watermark_on_request_path(tmp_path: Pat
         )
     assert status == 200
     assert body == b"inrelease"
+
+
+def test_asgi_head_dist_upgrader_allowlisted(tmp_path: Path) -> None:
+    """HEAD on dist-upgrader path returns 200, empty body, Content-Length from entity."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    entity = b"upgrade announcement"
+    storage.put(
+        "cache/ubuntu/dists/noble-updates/main/dist-upgrader-all/current/ReleaseAnnouncement",
+        entity,
+    )
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    client = TestClient(app)
+    path = "/ubuntu/dists/noble-updates/main/dist-upgrader-all/current/ReleaseAnnouncement"
+    head = client.head(path)
+    assert head.status_code == 200
+    assert head.content == b""
+    assert head.headers.get("content-length") == str(len(entity))
+    get = client.get(path)
+    assert get.status_code == 200
+    assert get.content == entity
+
+
+def test_asgi_head_meta_release_allowlisted(tmp_path: Path) -> None:
+    """HEAD on meta-release path is allowlisted."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    storage.put("cache/ubuntu/meta-release-lts", b"Suite: noble\n")
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    client = TestClient(app)
+    head = client.head("/ubuntu/meta-release-lts")
+    assert head.status_code == 200
+    assert head.content == b""
+    assert int(head.headers["content-length"]) == len(b"Suite: noble\n")
+
+
+def test_asgi_head_pool_deb_not_allowlisted(tmp_path: Path) -> None:
+    """HEAD on pool .deb is not allowlisted (404 even if cached)."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    storage.put("cache/ubuntu/pool/main/v/vim/vim_1.0_amd64.deb", b"deb")
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    client = TestClient(app)
+    r = client.head("/ubuntu/pool/main/v/vim/vim_1.0_amd64.deb")
+    assert r.status_code == 404
+
+
+def test_asgi_head_dists_release_not_allowlisted(tmp_path: Path) -> None:
+    """HEAD on plain dists/Release is not allowlisted."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    storage.put("cache/ubuntu/dists/jammy/Release", b"Origin: Ubuntu\n")
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    client = TestClient(app)
+    assert client.head("/ubuntu/dists/jammy/Release").status_code == 404
+
+
+def test_asgi_head_metrics_not_allowlisted(tmp_path: Path) -> None:
+    """HEAD /metrics stays 404 (no mirror-wide HEAD)."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    assert TestClient(app).head("/metrics").status_code == 404
+
+
+def test_handler_head_dist_upgrader_no_body(tmp_path: Path) -> None:
+    """Legacy handler: allowlisted HEAD sends headers without entity body."""
+    storage = LocalStorageBackend(tmp_path)
+    entity = b"x" * 12
+    storage.put(
+        "cache/ubuntu/dists/noble-updates/main/dist-upgrader-all/current/ReleaseAnnouncement",
+        entity,
+    )
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    handler_class = type(
+        "Handler",
+        (RepoHTTPRequestHandler,),
+        {"storage": storage, "upstreams": upstreams, "local_prefixes": []},
+    )
+    path = "/ubuntu/dists/noble-updates/main/dist-upgrader-all/current/ReleaseAnnouncement"
+    req = Mock()
+    req.makefile.return_value = BytesIO()
+    req.raw_requestline = f"HEAD {path} HTTP/1.1\r\n".encode()
+    req.command = "HEAD"
+    req.path = path
+    req.client_address = ("127.0.0.1", 0)
+    req.requestline = f"HEAD {path} HTTP/1.1"
+    wfile = BytesIO()
+    handler = handler_class(req, ("127.0.0.1", 0), None)
+    handler.path = path
+    handler.command = "HEAD"
+    handler.requestline = f"HEAD {path} HTTP/1.1"
+    handler.request_version = "HTTP/1.1"
+    handler.wfile = wfile
+    handler.do_HEAD()
+    raw = wfile.getvalue()
+    assert b"200" in raw
+    header_end = raw.find(b"\r\n\r\n")
+    assert header_end != -1
+    assert raw[header_end + 4 :] == b""
+

@@ -1,9 +1,10 @@
-"""ASGI app that routes /api/v1 to FastAPI and serves repo/GET otherwise."""
+"""ASGI app that routes /api/v1 to FastAPI and serves repo paths (GET; scoped HEAD for do-release-upgrade)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 import time
 from typing import Any, Callable
 
@@ -15,6 +16,7 @@ from repo_man.metrics import (
     http_requests_total,
     packages_served_total,
 )
+from repo_man.http_upgrade_paths import is_do_release_upgrade_head_path
 from repo_man.repo_service import RepoService
 from repo_man.storage.base import StorageBackend
 
@@ -47,6 +49,17 @@ def _error_response(status: int, message: str = "") -> tuple[int, list[tuple[str
     return status, headers, body
 
 
+def _finalize_head_response(
+    http_method: str,
+    result: tuple[int, list[tuple[str, str]], bytes],
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    """For HEAD, drop the body but keep Content-Length and other headers (RFC 9110)."""
+    if http_method != "HEAD":
+        return result
+    status, headers, _body = result
+    return status, headers, b""
+
+
 def handle_get_response(
     path: str,
     client_address: tuple[str, int] | None,
@@ -62,27 +75,29 @@ def handle_get_response(
     enable_api: bool,
     metrics_callback: Callable[[], str] | None,
     get_client_id_fn: Callable[[str], str],
+    http_method: str = "GET",
 ) -> tuple[int, list[tuple[str, str]], bytes]:
     """
-    Handle a GET request; returns (status_code, headers, body).
+    Handle a GET or (allowlisted) HEAD request; returns (status_code, headers, body).
     Used by both the legacy HTTP handler and the ASGI app.
     """
     start = time.perf_counter()
     path_prefix = "/"
+    method_label = http_method.upper() if http_method else "GET"
     try:
         path_stripped = (path or "").strip("/")
         # When API is disabled, any /api/ path returns 404. When enabled, /api/v1 is handled by FastAPI; other /api/ GETs 404.
         if path_stripped.startswith("api/"):
             path_prefix = "/api"
             if not enable_api:
-                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-                return _error_response(404, "Not found")
+                http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
+                return _finalize_head_response(http_method, _error_response(404, "Not found"))
             if not path_stripped.startswith("api/v1/"):
-                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-                return _error_response(404, "Not found")
+                http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
+                return _finalize_head_response(http_method, _error_response(404, "Not found"))
             # Should not reach here for /api/v1 - ASGI routes that to FastAPI
-            http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-            return _error_response(404, "Not found")
+            http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
+            return _finalize_head_response(http_method, _error_response(404, "Not found"))
 
         service = RepoService(
             storage,
@@ -96,17 +111,27 @@ def handle_get_response(
         )
         key, path_prefix = service.resolve(path)
         if key == "METRICS":
+            if http_method == "HEAD":
+                http_requests_total.labels(method=method_label, path_prefix="/metrics", status="404").inc()
+                return _finalize_head_response(http_method, _error_response(404, "Not found"))
             content = (metrics_callback or get_metrics_output)()
             body = content.encode("utf-8")
-            http_requests_total.labels(method="GET", path_prefix="/metrics", status="200").inc()
-            return 200, [
-                ("Content-Type", "text/plain; charset=utf-8"),
-                ("Content-Length", str(len(body))),
-            ], body
+            http_requests_total.labels(method=method_label, path_prefix="/metrics", status="200").inc()
+            return _finalize_head_response(
+                http_method,
+                (
+                    200,
+                    [
+                        ("Content-Type", "text/plain; charset=utf-8"),
+                        ("Content-Length", str(len(body))),
+                    ],
+                    body,
+                ),
+            )
         if key is None:
             logger.debug("Not found: path_prefix=%s path=%s", path_prefix, path)
-            http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-            return _error_response(404, "Not found")
+            http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
+            return _finalize_head_response(http_method, _error_response(404, "Not found"))
         data = storage.get(key)
         data = service.maybe_refresh_metadata_ttl(key, data)
         served_from_upstream = False
@@ -138,8 +163,8 @@ def handle_get_response(
             if key.startswith("cache/"):
                 cache_requests_total.labels(result="miss").inc()
             logger.debug("Not found: path_prefix=%s key=%s", path_prefix, key)
-            http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
-            return _error_response(404, "Not found")
+            http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
+            return _finalize_head_response(http_method, _error_response(404, "Not found"))
         if key.startswith("cache/"):
             cache_requests_total.labels(result="hit" if not served_from_upstream else "miss").inc()
         if key.endswith(".gz"):
@@ -156,8 +181,8 @@ def handle_get_response(
             ("Content-Type", content_type),
             ("Content-Length", str(len(data))),
         ]
-        http_requests_total.labels(method="GET", path_prefix=path_prefix, status="200").inc()
-        if key.endswith((".deb", ".rpm", ".apk")):
+        http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="200").inc()
+        if http_method != "HEAD" and key.endswith((".deb", ".rpm", ".apk")):
             packages_served_total.labels(path_prefix=path_prefix).inc()
             if package_hash_store is not None:
                 parts_key = key.split("/", 2)
@@ -172,7 +197,7 @@ def handle_get_response(
                     client_last_served_timestamp_seconds.labels(client=client_id).set(time.time())
                 except Exception:
                     pass
-        return 200, headers, data
+        return _finalize_head_response(http_method, (200, headers, data))
     finally:
         http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
 
@@ -190,7 +215,7 @@ def make_asgi_app(
     metrics_callback: Callable[[], str] | None,
     get_client_id_fn: Callable[[str], str],
 ):
-    """Build the ASGI app that routes /api/v1 to FastAPI and serves GET for repo paths."""
+    """Build the ASGI app that routes /api/v1 to FastAPI and serves GET (and scoped HEAD) for repo paths."""
     from repo_man.api import create_api_app
     from repo_man.serve import set_metrics_callback
 
@@ -212,7 +237,10 @@ def make_asgi_app(
         if (path.startswith("/api/v1") or path == "/api/publish") and not enable_api:
             await _send_http_response(send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n")
             return
-        if method != "GET":
+        if method not in ("GET", "HEAD"):
+            await _send_http_response(send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n")
+            return
+        if method == "HEAD" and not is_do_release_upgrade_head_path(path):
             await _send_http_response(send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n")
             return
         # Fast-path /metrics so it does not depend on worker thread availability.
@@ -240,21 +268,24 @@ def make_asgi_app(
         loop = asyncio.get_running_loop()
         status, headers, body = await loop.run_in_executor(
             None,
-            handle_get_response,
-            path,
-            client,
-            forwarded_for,
-            storage,
-            upstreams,
-            local_prefixes,
-            metadata_ttl_seconds,
-            package_hash_store,
-            disk_high_watermark_bytes,
-            get_disk_usage_fn,
-            keep_versions_per_package,
-            enable_api,
-            metrics_callback,
-            get_client_id_fn,
+            partial(
+                handle_get_response,
+                path,
+                client,
+                forwarded_for,
+                storage,
+                upstreams,
+                local_prefixes,
+                metadata_ttl_seconds,
+                package_hash_store,
+                disk_high_watermark_bytes,
+                get_disk_usage_fn,
+                keep_versions_per_package,
+                enable_api,
+                metrics_callback,
+                get_client_id_fn,
+                http_method=method,
+            ),
         )
         await _send_http_response(send, status, headers, body)
 
