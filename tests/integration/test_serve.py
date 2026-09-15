@@ -481,6 +481,50 @@ def test_asgi_head_meta_release_allowlisted(tmp_path: Path) -> None:
     assert int(head.headers["content-length"]) == len(b"Suite: noble\n")
 
 
+def test_asgi_get_meta_release_rewrites_archive_urls(tmp_path: Path) -> None:
+    """GET meta-release-lts rewrites Ubuntu archive URLs to the request Host."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    raw = (
+        b"Dist: noble\n"
+        b"Release-File: http://archive.ubuntu.com/ubuntu/dists/noble-updates/Release\n"
+        b"UpgradeTool: http://de.archive.ubuntu.com/ubuntu/dists/noble-updates/"
+        b"main/dist-upgrader-all/current/noble.tar.gz\n"
+        b"ReleaseNotes: http://changelogs.ubuntu.com/EOLReleaseAnnouncement\n"
+    )
+    storage = LocalStorageBackend(tmp_path)
+    storage.put("cache/ubuntu/meta-release-lts", raw)
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    client = TestClient(app, base_url="https://repo.vbl-net.de")
+    resp = client.get("/ubuntu/meta-release-lts")
+    assert resp.status_code == 200
+    text = resp.text
+    assert "https://repo.vbl-net.de/ubuntu/dists/noble-updates/Release" in text
+    assert (
+        "https://repo.vbl-net.de/ubuntu/dists/noble-updates/"
+        "main/dist-upgrader-all/current/noble.tar.gz"
+    ) in text
+    assert "http://changelogs.ubuntu.com/EOLReleaseAnnouncement" in text
+    assert "archive.ubuntu.com" not in text
+    # Cached bytes stay upstream; rewrite is serve-time only.
+    assert storage.get("cache/ubuntu/meta-release-lts") == raw
+
+
 def test_asgi_head_pool_deb_not_allowlisted(tmp_path: Path) -> None:
     """HEAD on pool .deb is not allowlisted (404 even if cached)."""
     from starlette.testclient import TestClient

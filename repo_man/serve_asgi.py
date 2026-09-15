@@ -16,7 +16,12 @@ from repo_man.metrics import (
     http_requests_total,
     packages_served_total,
 )
-from repo_man.http_upgrade_paths import is_do_release_upgrade_head_path
+from repo_man.http_upgrade_paths import (
+    is_do_release_upgrade_head_path,
+    is_meta_release_path,
+    public_origin_from_headers,
+    rewrite_meta_release_urls,
+)
 from repo_man.repo_service import RepoService
 from repo_man.storage.base import StorageBackend
 
@@ -76,10 +81,14 @@ def handle_get_response(
     metrics_callback: Callable[[], str] | None,
     get_client_id_fn: Callable[[str], str],
     http_method: str = "GET",
+    public_origin: str | None = None,
 ) -> tuple[int, list[tuple[str, str]], bytes]:
     """
     Handle a GET or (allowlisted) HEAD request; returns (status_code, headers, body).
     Used by both the legacy HTTP handler and the ASGI app.
+
+    ``public_origin`` (e.g. ``https://repo.example.com``) rewrites Ubuntu archive
+    URLs inside ``meta-release`` / ``meta-release-lts`` bodies to this mirror.
     """
     start = time.perf_counter()
     path_prefix = "/"
@@ -167,6 +176,15 @@ def handle_get_response(
             return _finalize_head_response(http_method, _error_response(404, "Not found"))
         if key.startswith("cache/"):
             cache_requests_total.labels(result="hit" if not served_from_upstream else "miss").inc()
+        if is_meta_release_path(path) and public_origin and key.startswith("cache/"):
+            parts = key.split("/", 2)
+            upstream_id = parts[1] if len(parts) >= 2 else None
+            rewrite_prefix = path_prefix
+            for u in upstreams:
+                if u.get("name") == upstream_id:
+                    rewrite_prefix = (u.get("path_prefix") or "/").rstrip("/") or "/"
+                    break
+            data = rewrite_meta_release_urls(data, public_origin, rewrite_prefix)
         if key.endswith(".gz"):
             content_type = "application/gzip"
         elif key.endswith(".deb"):
@@ -257,14 +275,30 @@ def make_asgi_app(
             return
         client = scope.get("client") or ("", 0)
         forwarded_for: str | None = None
+        host: str | None = None
+        forwarded_proto: str | None = None
+        forwarded_host: str | None = None
         # scope["headers"] is a list of (name, value) where both are bytes.
         for name, value in (scope.get("headers") or []):
-            if name.lower() == b"x-forwarded-for":
-                try:
-                    forwarded_for = value.decode("latin-1").strip()  # headers are ASCII-ish
-                except Exception:
-                    forwarded_for = None
-                break
+            lower = name.lower()
+            try:
+                decoded = value.decode("latin-1").strip()
+            except Exception:
+                continue
+            if lower == b"x-forwarded-for":
+                forwarded_for = decoded or None
+            elif lower == b"host":
+                host = decoded or None
+            elif lower == b"x-forwarded-proto":
+                forwarded_proto = decoded or None
+            elif lower == b"x-forwarded-host":
+                forwarded_host = decoded or None
+        public_origin = public_origin_from_headers(
+            host,
+            scheme=str(scope.get("scheme") or "http"),
+            forwarded_proto=forwarded_proto,
+            forwarded_host=forwarded_host,
+        )
         loop = asyncio.get_running_loop()
         status, headers, body = await loop.run_in_executor(
             None,
@@ -285,6 +319,7 @@ def make_asgi_app(
                 metrics_callback,
                 get_client_id_fn,
                 http_method=method,
+                public_origin=public_origin,
             ),
         )
         await _send_http_response(send, status, headers, body)

@@ -110,6 +110,13 @@ sudo sed -i 's#^URI_LTS=.*#URI_LTS=http://HOST:8080/ubuntu/meta-release-lts#' /e
 
 Then run `sudo do-release-upgrade`.
 
+When serving `meta-release` / `meta-release-lts`, repo-man rewrites Ubuntu archive URLs
+(`archive.ubuntu.com`, `*.archive.ubuntu.com`, `security.ubuntu.com`, `old-releases.ubuntu.com`)
+in the body to the request's public origin (from `Host` / `X-Forwarded-Host` and
+`X-Forwarded-Proto`) plus the upstream `path_prefix`. That way `Release-File` and
+`UpgradeTool` downloads also go through the mirror. Links to `changelogs.ubuntu.com`
+(e.g. EOL release notes) are left unchanged.
+
 Only **GET** and **scoped HEAD** are served for repo paths: HEAD is accepted for `do-release-upgrade` metadata (paths under the dist-upgrader tree and for `meta-release` / `meta-release-lts` at the end of the URL); other HEAD requests return 404.
 
 ## Publish API

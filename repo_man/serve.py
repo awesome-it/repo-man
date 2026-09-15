@@ -192,10 +192,19 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
         try:
             # Support reverse proxies by honoring X-Forwarded-For for client metrics.
             forwarded_for: str | None = None
+            public_origin: str | None = None
             try:
                 hdrs = getattr(self, "headers", None)
                 if hdrs is not None:
                     forwarded_for = hdrs.get("X-Forwarded-For")
+                    from repo_man.http_upgrade_paths import public_origin_from_headers
+
+                    public_origin = public_origin_from_headers(
+                        hdrs.get("Host"),
+                        scheme="http",
+                        forwarded_proto=hdrs.get("X-Forwarded-Proto"),
+                        forwarded_host=hdrs.get("X-Forwarded-Host"),
+                    )
             except Exception:
                 forwarded_for = None
             status, headers, body = handle_get_response(
@@ -213,6 +222,7 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 self.enable_api,
                 _metrics_callback or _default_metrics,
                 _get_client_id,
+                public_origin=public_origin,
             )
             self.send_response(status)
             for name, value in headers:
@@ -237,10 +247,19 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             forwarded_for: str | None = None
+            public_origin: str | None = None
             try:
                 hdrs = getattr(self, "headers", None)
                 if hdrs is not None:
                     forwarded_for = hdrs.get("X-Forwarded-For")
+                    from repo_man.http_upgrade_paths import public_origin_from_headers
+
+                    public_origin = public_origin_from_headers(
+                        hdrs.get("Host"),
+                        scheme="http",
+                        forwarded_proto=hdrs.get("X-Forwarded-Proto"),
+                        forwarded_host=hdrs.get("X-Forwarded-Host"),
+                    )
             except Exception:
                 forwarded_for = None
             status, headers, body = handle_get_response(
@@ -259,6 +278,7 @@ class RepoHTTPRequestHandler(BaseHTTPRequestHandler):
                 _metrics_callback or _default_metrics,
                 _get_client_id,
                 http_method="HEAD",
+                public_origin=public_origin,
             )
             self.send_response(status)
             for name, value in headers:

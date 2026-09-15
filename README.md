@@ -65,7 +65,7 @@ If you **don’t provide a config file**, repo-man uses built-in **default upstr
 | `/debian` | APT | `deb http://HOST:8080/debian bookworm main` (bookworm, bookworm-updates) |
 | `/rocky9` | RPM | `baseurl=http://HOST:8080/rocky9` (Rocky Linux 9 BaseOS) |
 
-For Ubuntu, default upstreams also proxy `meta-release*` via `changelogs.ubuntu.com`, so standard `do-release-upgrade` can use the same mirror host when configured to read `meta-release-lts` from your repo-man URL.
+For Ubuntu, default upstreams also proxy `meta-release*` via `changelogs.ubuntu.com`, and rewrite archive URLs in that file to the mirror host so `do-release-upgrade` can fetch UpgradeTool / Release metadata through the same host when `/etc/update-manager/meta-release` points at repo-man.
 
 To **disable** default upstreams (e.g. you only want upstreams from your own config): set **`REPO_MIRROR_NO_DEFAULT_UPSTREAMS=1`**, pass **`--no-default-upstreams`** to `repo-man serve`, or create a config file with **`disable_default_upstreams: true`**. Providing a config file that defines any upstreams also disables defaults (only your configured upstreams are used).
 
