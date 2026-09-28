@@ -10,6 +10,14 @@ Format metadata (e.g. Release, Packages for APT) must not be stale. We either pr
 
 A full mirror would download every package from upstream and keep disk usage unbounded. We chose a **pull-through cache**: we only store packages that have been requested at least once, and we keep only the **latest N versions** of each package (configurable N). This keeps disk usage bounded while still allowing "install any version available upstream" (metadata is fresh, so clients see all versions; we fetch and cache on first request).
 
+## Stream-through package pulls
+
+Large pool objects (`.deb` / `.rpm` / `.apk`) must not store-then-serve: apt and friends time out while waiting for a full upstream download into memory. On package miss we **stream through**: upstream bytes are written to a `.partial` file and fan-out to all attached clients as they arrive; on success the partial is atomically renamed to the final cache key.
+
+**Single-flight fan-out:** concurrent requests for the same uncached key share one upstream GET. A late joiner attaches to the in-flight fetcher, replays bytes already on disk, then receives live chunks.
+
+**Disconnect-finish:** closing a client socket only unsubscribes that client. The fetcher keeps reading upstream until the object is committed (or fails and the partial is removed). Metadata remains store-then-serve.
+
 ## Latest-N retention
 
 Prune runs (manually or automatically after cache writes) remove older versions of each package, keeping the N newest. Version comparison is format-specific (e.g. Debian version for APT). N is configurable (`CACHE_VERSIONS_PER_PACKAGE`, default 3). Trade-off: less disk vs. fewer old versions in cache. Metadata remains fresh, so clients can request an old version; we fetch it from upstream again if it was pruned.

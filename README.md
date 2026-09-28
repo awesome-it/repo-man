@@ -97,6 +97,12 @@ docker compose -f tests/docker/compose.integration.yaml up -d
 docker compose -f tests/docker/compose.integration.yaml run --rm ubuntu-client
 ```
 
+Heavy **GitLab suite-split** matrix (Ubuntu 20.04/22.04/24.04 install gitlab-ce + gitlab-runner; sequential, cross-suite reinstall, parallel):
+
+```bash
+./tests/docker/run_gitlab_suites.sh
+```
+
 See [tests/docker/README.md](tests/docker/README.md) for details.
 
 ## Support

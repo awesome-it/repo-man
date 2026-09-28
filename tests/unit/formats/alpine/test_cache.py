@@ -51,8 +51,10 @@ def test_get_or_fetch_package_from_upstream(mock_httpx: MagicMock, tmp_path: Pat
     storage = LocalStorageBackend(tmp_path)
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.content = b"apk payload"
-    mock_httpx.Client.return_value.__enter__.return_value.get.return_value = mock_response
+    mock_response.headers = {"content-length": "11"}
+    mock_response.iter_bytes.return_value = iter([b"apk payload"])
+    client = mock_httpx.Client.return_value
+    client.send.return_value = mock_response
     config = {"url": "https://example.com/alpine"}
     data, from_upstream = get_or_fetch(
         "alpine-repo",

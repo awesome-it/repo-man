@@ -37,6 +37,8 @@ flowchart LR
 
 - **Clients** use the repo-man URL with path prefixes (e.g. `http://host:8080/ubuntu`, `http://host:8080/local`).
 - **Repo-man** serves repository files from storage; on cache miss it fetches from the matching upstream and stores the result.
+- **Package misses** (`.deb` / `.rpm` / `.apk`) **stream through**: bytes go to the client as they arrive from upstream while being teed to a `.partial` file, then atomically renamed into the cache. Concurrent clients for the same key attach to one in-flight fetch (replay partial + live fan-out). Client disconnect unsubscribes only; the fill still completes.
+- **Metadata** stays store-then-serve (fetch, cache, then respond).
 - **Storage** holds both pull-through cache (`cache/<upstream_id>/`) and published repos (e.g. `local/`).
 
 ---
@@ -121,7 +123,9 @@ flowchart TD
 
 ## Data flow: client request (pull-through)
 
-Request path is matched to a path prefix; the format backend resolves the storage key and, on cache miss, fetches from upstream. Example (APT):
+Request path is matched to a path prefix; the format backend resolves the storage key and, on cache miss, fetches from upstream. **Metadata** is store-then-serve. **Pool packages** stream through a single-flight fetcher.
+
+### Metadata (store-then-serve)
 
 ```mermaid
 sequenceDiagram
@@ -150,6 +154,37 @@ sequenceDiagram
     ASGI-->>Client: 200 + body
   end
 ```
+
+### Package miss (stream-through + fan-out)
+
+```mermaid
+sequenceDiagram
+  participant A as ClientA
+  participant B as ClientB
+  participant ASGI
+  participant F as InflightFetcher
+  participant Partial as key.partial
+  participant Final as cache key
+  participant Up as upstream
+  A->>ASGI: GET pool/.../pkg.deb
+  ASGI->>F: attach (leader)
+  F->>Up: one stream GET
+  B->>ASGI: GET same package
+  ASGI->>F: attach mid-flight
+  F-->>B: replay bytes already in Partial
+  loop each chunk
+    Up-->>F: chunk
+    F->>Partial: append
+    F-->>A: chunk
+    F-->>B: chunk
+  end
+  Note over A,F: A disconnects → unsubscribe only
+  F->>Partial: keep going
+  F->>Final: atomic rename
+  F-->>B: EOF
+```
+
+Concurrent misses for the same storage key share **one** upstream GET. Late joiners replay the partial file then follow live chunks. If every client disconnects, the fetcher still commits the final cache object.
 
 ---
 

@@ -14,6 +14,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from repo_man.formats.apt.version import compare_versions
+from repo_man.formats.pull_through import PackageStream
 from repo_man.hash_store.base import PackageHashStore
 from repo_man.metrics import (
     cache_package_hash_mismatch_total,
@@ -251,41 +252,94 @@ def get_or_fetch_package(
     storage: StorageBackend,
 ) -> bytes | None:
     """
-    Return .deb bytes from cache or fetch from upstream, store, then return.
+    Return .deb bytes from cache or fetch from upstream (single-flight stream-through), store, then return.
     relative_path is the path within the repo (e.g. pool/main/a/apt/apt_1.0_amd64.deb).
     """
+    stream = attach_package_stream(upstream_id, relative_path, upstream_config, storage)
+    if stream is None:
+        return None
+    try:
+        return b"".join(stream.iter_chunks())
+    except Exception:
+        return None
+    finally:
+        stream.close()
+
+
+def attach_package_stream(
+    upstream_id: str,
+    relative_path: str,
+    upstream_config: dict[str, Any],
+    storage: StorageBackend,
+) -> PackageStream | None:
+    """
+    Attach to a cached or in-flight package stream (fan-out pull-through).
+    Returns None if upstream cannot be contacted / configured.
+    """
+    from repo_man.formats.pull_through import (
+        UpstreamStream,
+        get_or_attach_package_stream,
+    )
+
     prefix = _storage_prefix(upstream_id)
     key = f"{prefix}/pool/{relative_path}" if not relative_path.startswith("pool/") else f"{prefix}/{relative_path}"
-    existing = storage.get(key)
-    if existing is not None:
-        return existing
     base_url = upstream_config.get("url") or upstream_config.get("base_url", "")
-    if not base_url:
+    if not base_url and not storage.exists(key):
         logger.warning("Package fetch skipped: upstream=%s path=%s no base_url", upstream_id, relative_path)
         return None
-    url = base_url.rstrip("/") + "/" + relative_path.lstrip("/")
+    url = base_url.rstrip("/") + "/" + relative_path.lstrip("/") if base_url else ""
     headers, basic_auth = _resolve_upstream_auth(upstream_config)
-    try:
-        with httpx.Client(follow_redirects=True, timeout=60.0) as client:
-            r = client.get(url, headers=headers, auth=basic_auth)
-            if r.status_code == 200:
-                storage.put(key, r.content)
-                packages_pulled_from_upstream_total.labels(upstream=upstream_id).inc()
-                upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
-                logger.info("Saved package: upstream=%s package=%s", upstream_id, relative_path)
-                return r.content
-            cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-            logger.warning(
-                "Package fetch failed: upstream=%s path=%s status=%s",
-                upstream_id,
-                relative_path,
-                r.status_code,
-            )
-    except Exception as e:
-        cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-        logger.warning("Package fetch failed: upstream=%s path=%s error=%s", upstream_id, relative_path, e)
-    return None
 
+    def fetch_upstream() -> UpstreamStream:
+        timeout = httpx.Timeout(1800.0, connect=30.0)
+        # Client must stay open for the lifetime of the chunk iterator; close in generator finally.
+        client = httpx.Client(follow_redirects=True, timeout=timeout)
+        try:
+            req = client.build_request("GET", url, headers=headers)
+            r = client.send(req, stream=True, auth=basic_auth)
+            if r.status_code != 200:
+                r.close()
+                client.close()
+                cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+                raise RuntimeError(f"upstream status {r.status_code}")
+            cl_hdr = r.headers.get("content-length")
+            content_length = int(cl_hdr) if cl_hdr and cl_hdr.isdigit() else None
+
+            def chunks() -> Any:
+                try:
+                    for chunk in r.iter_bytes(1024 * 1024):
+                        yield chunk
+                finally:
+                    r.close()
+                    client.close()
+
+            return UpstreamStream(content_length=content_length, chunks=chunks())
+        except Exception:
+            client.close()
+            raise
+
+    def on_success() -> None:
+        packages_pulled_from_upstream_total.labels(upstream=upstream_id).inc()
+        upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
+        logger.info("Saved package: upstream=%s package=%s", upstream_id, relative_path)
+
+    def on_error(exc: BaseException) -> None:
+        cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+        logger.warning("Package fetch failed: upstream=%s path=%s error=%s", upstream_id, relative_path, exc)
+
+    if storage.exists(key):
+        return get_or_attach_package_stream(storage, key, fetch_upstream)
+
+    if not base_url:
+        return None
+
+    return get_or_attach_package_stream(
+        storage,
+        key,
+        fetch_upstream,
+        on_success=on_success,
+        on_error=on_error,
+    )
 
 def list_cached_packages_by_name(
     storage: StorageBackend,

@@ -57,6 +57,14 @@ def cache() -> None:
 @click.option("--archs", default="amd64", help="Comma-separated architectures (APT).")
 @click.option("--arch", default="", help="Architecture (RPM, e.g. x86_64).")
 @click.option("--branch", default="", help="Branch (Alpine, e.g. main, community).")
+@click.option(
+    "--split-suites/--no-split-suites",
+    default=None,
+    help=(
+        "For classic APT with 2+ suites: expand into per-suite path prefixes (default: yes). "
+        "Use --no-split-suites for Ubuntu/Debian-style shared pool under one prefix."
+    ),
+)
 @click.pass_context
 def add_upstream(
     ctx: click.Context,
@@ -70,13 +78,14 @@ def add_upstream(
     archs: str,
     arch: str,
     branch: str,
+    split_suites: bool | None,
 ) -> None:
     """Register an upstream repo (APT, RPM, or Alpine)."""
     check_mode = ctx.obj.get("check_mode", False)
     out_json = ctx.obj.get("output_json")
     config_path = _config_path(ctx)
     upstreams = list(config_module.get_upstreams_from_config(config_path) if config_path else [])
-    new_entry = {
+    new_entry: dict = {
         "name": name,
         "url": base_url,
         "base_url": base_url,
@@ -87,6 +96,8 @@ def add_upstream(
         "components": [c.strip() for c in components.split(",") if c.strip()],
         "archs": [a.strip() for a in archs.split(",") if a.strip()],
     }
+    if split_suites is not None:
+        new_entry["split_suites"] = split_suites
     if format_name == "rpm" and arch:
         new_entry["arch"] = arch.strip()
     if format_name == "alpine" and branch:
@@ -193,10 +204,12 @@ def prune(ctx: click.Context, upstream: str | None) -> None:
     repo_root = config_module.get_repo_root(ctx.obj.get("repo_root"))
     storage = LocalStorageBackend(repo_root)
     config_path = _config_path(ctx)
-    upstreams_list = config_module.get_upstreams_from_config(config_path) if config_path else []
+    raw_upstreams = list(config_module.get_upstreams_from_config(config_path) if config_path else [])
     keep_n = config_module.get_cache_versions_per_package()
     if upstream is not None:
-        upstreams_list = [u for u in upstreams_list if u.get("name") == upstream]
+        raw_upstreams = [u for u in raw_upstreams if u.get("name") == upstream]
+    # Expand suite splits so prune targets cache/<name>-<suite>/ keys used at serve time.
+    upstreams_list = config_module.expand_split_suite_upstreams(raw_upstreams)
     upstream_ids = [u["name"] for u in upstreams_list if u.get("name")]
 
     # Disk watermark: free cache (never published) when over high watermark

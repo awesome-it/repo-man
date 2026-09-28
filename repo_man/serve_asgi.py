@@ -6,7 +6,7 @@ import asyncio
 import logging
 from functools import partial
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from repo_man.formats.registry import get_backend
 from repo_man.metrics import (
@@ -31,6 +31,8 @@ except ImportError:
     _PackageHashStore = None  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
+
+_PACKAGE_SUFFIXES = (".deb", ".udeb", ".rpm", ".apk")
 
 
 def _get_first_x_forwarded_for(forwarded_for: str | None) -> str | None:
@@ -65,6 +67,81 @@ def _finalize_head_response(
     return status, headers, b""
 
 
+def _content_type_for_key(key: str) -> str:
+    if key.endswith(".gz"):
+        return "application/gzip"
+    if key.endswith((".deb", ".udeb")):
+        return "application/vnd.debian.binary-package"
+    if key.endswith(".rpm"):
+        return "application/x-rpm"
+    if key.endswith(".apk"):
+        return "application/vnd.apk"
+    return "application/octet-stream"
+
+
+def _is_package_key(key: str) -> bool:
+    return key.endswith(_PACKAGE_SUFFIXES)
+
+
+def _attach_package_stream_for_key(
+    key: str,
+    storage: StorageBackend,
+    upstreams: list[dict[str, Any]],
+):
+    """Resolve upstream and attach to a package pull-through stream. None if not applicable."""
+    if not key.startswith("cache/") or not _is_package_key(key):
+        return None
+    parts = key.split("/", 2)
+    if len(parts) < 3:
+        return None
+    upstream_id, suffix = parts[1], parts[2]
+    upstream_config = next((u for u in upstreams if u.get("name") == upstream_id), None)
+    if upstream_config is None:
+        return None
+    fmt = upstream_config.get("format", "apt")
+    try:
+        if fmt == "apt":
+            from repo_man.formats.apt import cache as apt_cache
+
+            return apt_cache.attach_package_stream(upstream_id, suffix, upstream_config, storage)
+        if fmt == "rpm":
+            from repo_man.formats.rpm import cache as rpm_cache
+
+            return rpm_cache.attach_package_stream(upstream_id, suffix, upstream_config, storage)
+        if fmt == "alpine":
+            from repo_man.formats.alpine import cache as alpine_cache
+
+            return alpine_cache.attach_package_stream(upstream_id, suffix, upstream_config, storage)
+    except Exception as e:
+        logger.warning("attach_package_stream failed: key=%s error=%s", key, e)
+    return None
+
+
+def _record_package_served(
+    key: str,
+    path_prefix: str,
+    package_hash_store: Any,
+    client_address: tuple[str, int] | None,
+    forwarded_for: str | None,
+    get_client_id_fn: Callable[[str], str],
+) -> None:
+    packages_served_total.labels(path_prefix=path_prefix).inc()
+    if package_hash_store is not None:
+        parts_key = key.split("/", 2)
+        if len(parts_key) >= 3:
+            package_hash_store.set_last_served(parts_key[1], parts_key[2], time.time())
+    if client_address:
+        try:
+            client_ip = _get_first_x_forwarded_for(forwarded_for) or client_address[0]
+            client_id = get_client_id_fn(client_ip)
+            from repo_man.metrics import client_packages_served_total, client_last_served_timestamp_seconds
+
+            client_packages_served_total.labels(client=client_id).inc()
+            client_last_served_timestamp_seconds.labels(client=client_id).set(time.time())
+        except Exception:
+            pass
+
+
 def handle_get_response(
     path: str,
     client_address: tuple[str, int] | None,
@@ -85,17 +162,16 @@ def handle_get_response(
 ) -> tuple[int, list[tuple[str, str]], bytes]:
     """
     Handle a GET or (allowlisted) HEAD request; returns (status_code, headers, body).
-    Used by both the legacy HTTP handler and the ASGI app.
+    Used by both the legacy HTTP handler and the ASGI app for non-streaming responses.
 
-    ``public_origin`` (e.g. ``https://repo.example.com``) rewrites Ubuntu archive
-    URLs inside ``meta-release`` / ``meta-release-lts`` bodies to this mirror.
+    Package pulls should prefer the ASGI streaming path; this still supports buffered
+    legacy serve via pull-through (joins stream chunks).
     """
     start = time.perf_counter()
     path_prefix = "/"
     method_label = http_method.upper() if http_method else "GET"
     try:
         path_stripped = (path or "").strip("/")
-        # When API is disabled, any /api/ path returns 404. When enabled, /api/v1 is handled by FastAPI; other /api/ GETs 404.
         if path_stripped.startswith("api/"):
             path_prefix = "/api"
             if not enable_api:
@@ -104,7 +180,6 @@ def handle_get_response(
             if not path_stripped.startswith("api/v1/"):
                 http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
                 return _finalize_head_response(http_method, _error_response(404, "Not found"))
-            # Should not reach here for /api/v1 - ASGI routes that to FastAPI
             http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
             return _finalize_head_response(http_method, _error_response(404, "Not found"))
 
@@ -141,6 +216,37 @@ def handle_get_response(
             logger.debug("Not found: path_prefix=%s path=%s", path_prefix, path)
             http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
             return _finalize_head_response(http_method, _error_response(404, "Not found"))
+
+        # Package path: use pull-through attach (buffered join for this legacy API)
+        if key.startswith("cache/") and _is_package_key(key):
+            stream = _attach_package_stream_for_key(key, storage, upstreams)
+            if stream is None and not storage.exists(key):
+                # Fall through to generic get_or_fetch for unusual layouts
+                pass
+            elif stream is not None:
+                from_upstream = stream.from_upstream
+                try:
+                    data = b"".join(stream.iter_chunks())
+                except Exception:
+                    data = None
+                finally:
+                    stream.close()
+                if data is None:
+                    cache_requests_total.labels(result="miss").inc()
+                    http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="404").inc()
+                    return _finalize_head_response(http_method, _error_response(404, "Not found"))
+                headers = [
+                    ("Content-Type", _content_type_for_key(key)),
+                    ("Content-Length", str(len(data))),
+                ]
+                cache_requests_total.labels(result="miss" if from_upstream else "hit").inc()
+                http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="200").inc()
+                if http_method != "HEAD":
+                    _record_package_served(
+                        key, path_prefix, package_hash_store, client_address, forwarded_for, get_client_id_fn
+                    )
+                return _finalize_head_response(http_method, (200, headers, data))
+
         data = storage.get(key)
         data = service.maybe_refresh_metadata_ttl(key, data)
         served_from_upstream = False
@@ -165,9 +271,6 @@ def handle_get_response(
                         )
                     except ValueError:
                         pass
-        if served_from_upstream:
-            # Prune/watermark maintenance runs in a background loop, not on request path.
-            pass
         if data is None:
             if key.startswith("cache/"):
                 cache_requests_total.labels(result="miss").inc()
@@ -185,36 +288,15 @@ def handle_get_response(
                     rewrite_prefix = (u.get("path_prefix") or "/").rstrip("/") or "/"
                     break
             data = rewrite_meta_release_urls(data, public_origin, rewrite_prefix)
-        if key.endswith(".gz"):
-            content_type = "application/gzip"
-        elif key.endswith(".deb"):
-            content_type = "application/vnd.debian.binary-package"
-        elif key.endswith(".rpm"):
-            content_type = "application/x-rpm"
-        elif key.endswith(".apk"):
-            content_type = "application/vnd.apk"
-        else:
-            content_type = "application/octet-stream"
         headers = [
-            ("Content-Type", content_type),
+            ("Content-Type", _content_type_for_key(key)),
             ("Content-Length", str(len(data))),
         ]
         http_requests_total.labels(method=method_label, path_prefix=path_prefix, status="200").inc()
-        if http_method != "HEAD" and key.endswith((".deb", ".rpm", ".apk")):
-            packages_served_total.labels(path_prefix=path_prefix).inc()
-            if package_hash_store is not None:
-                parts_key = key.split("/", 2)
-                if len(parts_key) >= 3:
-                    package_hash_store.set_last_served(parts_key[1], parts_key[2], time.time())
-            if client_address:
-                try:
-                    client_ip = _get_first_x_forwarded_for(forwarded_for) or client_address[0]
-                    client_id = get_client_id_fn(client_ip)
-                    from repo_man.metrics import client_packages_served_total, client_last_served_timestamp_seconds
-                    client_packages_served_total.labels(client=client_id).inc()
-                    client_last_served_timestamp_seconds.labels(client=client_id).set(time.time())
-                except Exception:
-                    pass
+        if http_method != "HEAD" and _is_package_key(key):
+            _record_package_served(
+                key, path_prefix, package_hash_store, client_address, forwarded_for, get_client_id_fn
+            )
         return _finalize_head_response(http_method, (200, headers, data))
     finally:
         http_request_duration_seconds.labels(path_prefix=path_prefix).observe(time.perf_counter() - start)
@@ -246,7 +328,6 @@ def make_asgi_app(
         start = time.perf_counter()
         path = scope.get("path", "")
         method = scope.get("method", "GET")
-        # Route /api/v1 and legacy /api/publish to FastAPI when API is enabled
         if enable_api and fastapi_app is not None and (
             path.startswith("/api/v1") or path == "/api/publish"
         ):
@@ -261,7 +342,6 @@ def make_asgi_app(
         if method == "HEAD" and not is_do_release_upgrade_head_path(path):
             await _send_http_response(send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n")
             return
-        # Fast-path /metrics so it does not depend on worker thread availability.
         if path == "/metrics":
             content = (metrics_callback or get_metrics_output)()
             body = content.encode("utf-8")
@@ -278,7 +358,6 @@ def make_asgi_app(
         host: str | None = None
         forwarded_proto: str | None = None
         forwarded_host: str | None = None
-        # scope["headers"] is a list of (name, value) where both are bytes.
         for name, value in (scope.get("headers") or []):
             lower = name.lower()
             try:
@@ -299,6 +378,53 @@ def make_asgi_app(
             forwarded_proto=forwarded_proto,
             forwarded_host=forwarded_host,
         )
+
+        # Resolve path; stream package bodies without buffering the full object.
+        service = RepoService(
+            storage,
+            upstreams,
+            local_prefixes,
+            metadata_ttl_seconds,
+            package_hash_store,
+            disk_high_watermark_bytes,
+            get_disk_usage_fn,
+            keep_versions_per_package,
+        )
+        key, path_prefix = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: service.resolve(path)
+        )
+        if key is not None and key.startswith("cache/") and _is_package_key(key) and method == "GET":
+            stream = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _attach_package_stream_for_key(key, storage, upstreams),
+            )
+            if stream is not None:
+                headers = [("Content-Type", _content_type_for_key(key))]
+                if stream.content_length is not None:
+                    headers.append(("Content-Length", str(stream.content_length)))
+                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="200").inc()
+                cache_requests_total.labels(result="miss" if stream.from_upstream else "hit").inc()
+                _record_package_served(
+                    key, path_prefix, package_hash_store, client, forwarded_for, get_client_id_fn
+                )
+                try:
+                    await _send_http_stream(send, receive, 200, headers, stream.iter_chunks(), stream.close)
+                finally:
+                    http_request_duration_seconds.labels(path_prefix=path_prefix).observe(
+                        time.perf_counter() - start
+                    )
+                return
+            if not storage.exists(key):
+                http_requests_total.labels(method="GET", path_prefix=path_prefix, status="404").inc()
+                cache_requests_total.labels(result="miss").inc()
+                http_request_duration_seconds.labels(path_prefix=path_prefix).observe(
+                    time.perf_counter() - start
+                )
+                await _send_http_response(
+                    send, 404, [("Content-Type", "text/plain; charset=utf-8")], b"Not found\n"
+                )
+                return
+
         loop = asyncio.get_running_loop()
         status, headers, body = await loop.run_in_executor(
             None,
@@ -336,3 +462,67 @@ async def _send_http_response(
     h = [(k.encode("ascii"), v.encode("ascii")) for k, v in headers]
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": body})
+
+
+async def _send_http_stream(
+    send: Any,
+    receive: Any,
+    status: int,
+    headers: list[tuple[str, str]],
+    chunks: Iterator[bytes],
+    on_close: Callable[[], None] | None = None,
+) -> None:
+    """
+    Stream response body chunks. Client disconnect stops socket writes only;
+    ``on_close`` unsubscribes the client without cancelling the upstream fill.
+    """
+    h = [(k.encode("ascii"), v.encode("ascii")) for k, v in headers]
+    await send({"type": "http.response.start", "status": status, "headers": h})
+    disconnected = False
+
+    async def _watch_disconnect() -> None:
+        nonlocal disconnected
+        try:
+            while True:
+                message = await receive()
+                if message.get("type") == "http.disconnect":
+                    disconnected = True
+                    logger.info("Client disconnected during package stream; cache fill continues")
+                    return
+        except Exception:
+            disconnected = True
+
+    watch = asyncio.create_task(_watch_disconnect())
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            if disconnected:
+                break
+            try:
+                chunk = await loop.run_in_executor(None, lambda: next(chunks, None))
+            except Exception as e:
+                logger.warning("Package stream error: %s", e)
+                break
+            if chunk is None:
+                break
+            if disconnected:
+                break
+            try:
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            except Exception:
+                disconnected = True
+                logger.info("Client write failed during package stream; cache fill continues")
+                break
+        if not disconnected:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+    finally:
+        watch.cancel()
+        try:
+            await watch
+        except asyncio.CancelledError:
+            pass
+        if on_close is not None:
+            try:
+                on_close()
+            except Exception:
+                pass

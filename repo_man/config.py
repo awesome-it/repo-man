@@ -177,7 +177,7 @@ def load_config_file(path: Path) -> dict[str, Any]:
 
 
 def get_upstreams_from_config(config_path: Path | None) -> list[dict[str, Any]]:
-    """Return list of upstream config dicts from config file."""
+    """Return list of upstream config dicts from config file (unexpanded)."""
     if config_path is None:
         return []
     data = load_config_file(config_path)
@@ -185,6 +185,67 @@ def get_upstreams_from_config(config_path: Path | None) -> list[dict[str, Any]]:
     if isinstance(upstreams, list):
         return upstreams
     return []
+
+
+def _is_classic_apt_upstream(upstream: dict[str, Any]) -> bool:
+    fmt = str(upstream.get("format") or "apt").strip().lower()
+    if fmt != "apt":
+        return False
+    layout = str(upstream.get("layout") or "classic").strip().lower()
+    return layout == "classic"
+
+
+def _normalize_suites(upstream: dict[str, Any]) -> list[str]:
+    suites = upstream.get("suites") or []
+    if isinstance(suites, str):
+        return [s.strip() for s in suites.split(",") if s.strip()]
+    return [str(s).strip() for s in suites if str(s).strip()]
+
+
+def _wants_split_suites(upstream: dict[str, Any]) -> bool:
+    """Classic multi-suite APT splits by default; explicit false opts out."""
+    if "split_suites" in upstream:
+        return bool(upstream.get("split_suites"))
+    return True
+
+
+def expand_split_suite_upstreams(upstreams: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Expand classic APT upstreams with 2+ suites into one upstream per suite.
+
+    Default is to split (isolated path_prefix / cache root per suite) so shared pool
+    Filenames cannot collide across suites. Set split_suites: false to keep a single
+    prefix (Ubuntu/Debian-style).
+    """
+    result: list[dict[str, Any]] = []
+    seen_prefixes: set[str] = set()
+
+    def _register(entry: dict[str, Any]) -> None:
+        prefix = (entry.get("path_prefix") or "/").rstrip("/") or "/"
+        if prefix in seen_prefixes:
+            raise ValueError(f"path_prefix collision after suite split: {prefix}")
+        seen_prefixes.add(prefix)
+        result.append(entry)
+
+    for upstream in upstreams:
+        suites = _normalize_suites(upstream)
+        should_split = _is_classic_apt_upstream(upstream) and len(suites) >= 2 and _wants_split_suites(upstream)
+        if not should_split:
+            entry = dict(upstream)
+            _register(entry)
+            continue
+        if not suites:
+            name = upstream.get("name", "?")
+            raise ValueError(f"split_suites requires non-empty suites (upstream={name})")
+        base_name = str(upstream.get("name") or "upstream")
+        base_prefix = (upstream.get("path_prefix") or "/").rstrip("/") or ""
+        for suite in suites:
+            entry = {k: v for k, v in upstream.items() if k != "split_suites"}
+            entry["name"] = f"{base_name}-{suite}"
+            entry["path_prefix"] = f"{base_prefix}/{suite}" if base_prefix else f"/{suite}"
+            entry["suites"] = [suite]
+            _register(entry)
+    return result
 
 
 def get_default_upstreams() -> list[dict[str, Any]]:
@@ -208,6 +269,7 @@ def get_default_upstreams() -> list[dict[str, Any]]:
             ],
             "components": ["main"],
             "archs": ["amd64"],
+            "split_suites": False,
         },
         {
             "name": "debian",
@@ -219,6 +281,7 @@ def get_default_upstreams() -> list[dict[str, Any]]:
             "suites": ["bookworm", "bookworm-updates"],
             "components": ["main"],
             "archs": ["amd64"],
+            "split_suites": False,
         },
         {
             "name": "rocky9",
@@ -262,13 +325,16 @@ def get_effective_upstreams(
     Return (upstreams, used_defaults). Upstreams from config if non-empty; else default
     upstreams unless disabled by config, env REPO_MIRROR_NO_DEFAULT_UPSTREAMS, or --no-default-upstreams.
     used_defaults is True when the returned list is the built-in default upstreams.
+
+    Classic multi-suite APT upstreams are expanded into per-suite prefixes unless
+    split_suites is false (see expand_split_suite_upstreams).
     """
     from_config = get_upstreams_from_config(config_path) if config_path else []
     if from_config:
-        return (from_config, False)
+        return (expand_split_suite_upstreams(from_config), False)
     if get_disable_default_upstreams(config_path, flag_override=no_default_upstreams_flag or None):
         return ([], False)
-    return (get_default_upstreams(), True)
+    return (expand_split_suite_upstreams(get_default_upstreams()), True)
 
 
 def save_upstreams_to_config(config_path: Path, upstreams: list[dict[str, Any]]) -> None:

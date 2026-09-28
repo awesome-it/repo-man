@@ -29,7 +29,8 @@ spec:
               if [ ! -f /data/config.yaml ]; then
                 repo-man cache add-upstream --name ubuntu --url http://archive.ubuntu.com/ubuntu/ \
                   --format apt --layout classic --path-prefix /ubuntu \
-                  --suites noble,noble-updates,noble-security --components main --archs amd64
+                  --suites noble,noble-updates,noble-security --components main --archs amd64 \
+                  --no-split-suites
               fi
               exec repo-man serve --bind 0.0.0.0 --port 8080
           env:

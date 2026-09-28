@@ -85,21 +85,89 @@ def get_or_fetch(
         return (raw, True)
 
     # Package path (*.rpm)
-    try:
-        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
-            r = client.get(url)
-            if r.status_code != 200:
-                cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-                return (None, False)
-            storage.put(key, r.content)
-            packages_pulled_from_upstream_total.labels(upstream=upstream_id).inc()
-            upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
-            logger.info("Saved RPM package: upstream=%s path=%s", upstream_id, path_suffix)
-            return (r.content, True)
-    except Exception as e:
-        cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-        logger.warning("RPM package fetch failed: upstream=%s path=%s error=%s", upstream_id, path_suffix, e)
+    stream = _attach_rpm_stream(upstream_id, path_suffix, url, storage, key)
+    if stream is None:
         return (None, False)
+    try:
+        data = b"".join(stream.iter_chunks())
+        return (data, stream.from_upstream)
+    except Exception as e:
+        logger.warning("RPM package stream failed: upstream=%s path=%s error=%s", upstream_id, path_suffix, e)
+        return (None, False)
+    finally:
+        stream.close()
+
+
+def attach_package_stream(
+    upstream_id: str,
+    path_suffix: str,
+    upstream_config: dict[str, Any],
+    storage: StorageBackend,
+):
+    """Attach to cached or in-flight RPM package stream."""
+    prefix = _storage_prefix(upstream_id)
+    key = f"{prefix}/{path_suffix}" if path_suffix else prefix
+    base_url = (upstream_config.get("url") or upstream_config.get("base_url", "")).rstrip("/")
+    if not path_suffix.endswith(".rpm"):
+        return None
+    if not base_url and not storage.exists(key):
+        return None
+    url = f"{base_url}/{path_suffix.lstrip('/')}" if base_url else ""
+    return _attach_rpm_stream(upstream_id, path_suffix, url, storage, key)
+
+
+def _attach_rpm_stream(
+    upstream_id: str,
+    path_suffix: str,
+    url: str,
+    storage: StorageBackend,
+    key: str,
+):
+    from repo_man.formats.pull_through import UpstreamStream, get_or_attach_package_stream
+
+    def fetch_upstream() -> UpstreamStream:
+        timeout = httpx.Timeout(1800.0, connect=30.0)
+        client = httpx.Client(follow_redirects=True, timeout=timeout)
+        try:
+            req = client.build_request("GET", url)
+            r = client.send(req, stream=True)
+            if r.status_code != 200:
+                r.close()
+                client.close()
+                cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+                raise RuntimeError(f"upstream status {r.status_code}")
+            cl_hdr = r.headers.get("content-length")
+            content_length = int(cl_hdr) if cl_hdr and cl_hdr.isdigit() else None
+
+            def chunks():
+                try:
+                    for chunk in r.iter_bytes(1024 * 1024):
+                        yield chunk
+                finally:
+                    r.close()
+                    client.close()
+
+            return UpstreamStream(content_length=content_length, chunks=chunks())
+        except Exception:
+            client.close()
+            raise
+
+    def on_success() -> None:
+        packages_pulled_from_upstream_total.labels(upstream=upstream_id).inc()
+        upstream_last_access_timestamp_seconds.labels(upstream=upstream_id).set(time.time())
+        logger.info("Saved RPM package: upstream=%s path=%s", upstream_id, path_suffix)
+
+    def on_error(exc: BaseException) -> None:
+        cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+        logger.warning("RPM package fetch failed: upstream=%s path=%s error=%s", upstream_id, path_suffix, exc)
+
+    if storage.exists(key):
+        return get_or_attach_package_stream(storage, key, fetch_upstream)
+    if not url:
+        return None
+    return get_or_attach_package_stream(
+        storage, key, fetch_upstream, on_success=on_success, on_error=on_error
+    )
 
 
 def list_cached_packages_by_name(

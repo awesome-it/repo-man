@@ -327,6 +327,186 @@ def test_api_publish_missing_path_prefix_returns_400(tmp_path: Path) -> None:
     assert "path_prefix" in detail.lower()
 
 
+def test_asgi_streams_package_miss_without_buffering_full_object(tmp_path: Path) -> None:
+    """Package cache miss uses ASGI stream path (subscriber chunks), not handle_get_response body buffer."""
+    from starlette.testclient import TestClient
+
+    from repo_man.formats.pull_through import PackageStream, reset_inflight_for_tests
+    from repo_man.serve_asgi import make_asgi_app
+
+    reset_inflight_for_tests()
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [
+        {
+            "name": "ubuntu",
+            "path_prefix": "/ubuntu",
+            "format": "apt",
+            "url": "https://example.com/ubuntu/",
+        }
+    ]
+    calls = {"n": 0}
+
+    def fake_attach(key, storage_arg, upstreams_arg):
+        calls["n"] += 1
+        assert key.endswith(".deb")
+
+        def chunks():
+            yield b"BEGIN"
+            yield b"-END"
+            storage_arg.put(key, b"BEGIN-END")
+
+        return PackageStream(
+            content_length=9,
+            from_upstream=True,
+            _chunks=chunks(),
+            _close=lambda: None,
+        )
+
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    with patch("repo_man.serve_asgi._attach_package_stream_for_key", side_effect=fake_attach), patch(
+        "repo_man.serve_asgi.handle_get_response",
+        side_effect=AssertionError("buffered handle_get_response should not run for package stream"),
+    ):
+        client = TestClient(app)
+        resp = client.get("/ubuntu/pool/main/a/apt/apt_1.0_amd64.deb")
+    assert resp.status_code == 200
+    assert resp.content == b"BEGIN-END"
+    assert resp.headers.get("content-length") == "9"
+    assert calls["n"] == 1
+    assert storage.get("cache/ubuntu/pool/main/a/apt/apt_1.0_amd64.deb") == b"BEGIN-END"
+    reset_inflight_for_tests()
+
+
+def test_asgi_two_clients_share_one_upstream_fetch(tmp_path: Path) -> None:
+    """Two overlapping package GETs attach to one pull-through fetcher."""
+    import threading
+    import time
+
+    from starlette.testclient import TestClient
+
+    from repo_man.formats.pull_through import UpstreamStream, reset_inflight_for_tests
+    from repo_man.serve_asgi import make_asgi_app
+
+    reset_inflight_for_tests()
+    storage = LocalStorageBackend(tmp_path)
+    upstreams = [
+        {
+            "name": "ubuntu",
+            "path_prefix": "/ubuntu",
+            "format": "apt",
+            "url": "https://example.com/ubuntu/",
+        }
+    ]
+    release = threading.Event()
+    started = threading.Event()
+    fetches = {"n": 0}
+
+    def fetch_upstream():
+        fetches["n"] += 1
+        started.set()
+
+        def chunks():
+            yield b"ONE"
+            release.wait(timeout=5)
+            yield b"TWO"
+
+        return UpstreamStream(content_length=6, chunks=chunks())
+
+    def fake_attach(key, storage_arg, upstreams_arg):
+        from repo_man.formats.pull_through import get_or_attach_package_stream
+
+        return get_or_attach_package_stream(storage_arg, key, fetch_upstream)
+
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    results: list[bytes] = []
+    errors: list[BaseException] = []
+
+    def client_get() -> None:
+        try:
+            with patch("repo_man.serve_asgi._attach_package_stream_for_key", side_effect=fake_attach):
+                c = TestClient(app)
+                r = c.get("/ubuntu/pool/main/a/apt/apt_1.0_amd64.deb")
+                results.append(r.content)
+        except BaseException as e:
+            errors.append(e)
+
+    with patch("repo_man.serve_asgi._attach_package_stream_for_key", side_effect=fake_attach):
+        t1 = threading.Thread(target=client_get)
+        t2 = threading.Thread(target=client_get)
+        t1.start()
+        assert started.wait(timeout=3)
+        time.sleep(0.05)
+        t2.start()
+        time.sleep(0.05)
+        release.set()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+    assert not errors
+    assert results == [b"ONETWO", b"ONETWO"]
+    assert fetches["n"] == 1
+    key = "cache/ubuntu/pool/main/a/apt/apt_1.0_amd64.deb"
+    deadline = time.time() + 3
+    while time.time() < deadline and storage.get(key) is None:
+        time.sleep(0.02)
+    assert storage.get(key) == b"ONETWO"
+    reset_inflight_for_tests()
+
+
+def test_asgi_package_hit_streams_from_storage(tmp_path: Path) -> None:
+    """Cached package GET still uses the package stream path."""
+    from starlette.testclient import TestClient
+
+    from repo_man.serve_asgi import make_asgi_app
+
+    storage = LocalStorageBackend(tmp_path)
+    key = "cache/ubuntu/pool/main/v/vim/vim_1.0_amd64.deb"
+    storage.put(key, b"cached-deb")
+    upstreams = [{"name": "ubuntu", "path_prefix": "/ubuntu", "format": "apt", "url": "https://example.com/ubuntu/"}]
+    app = make_asgi_app(
+        storage,
+        upstreams,
+        [],
+        0,
+        None,
+        None,
+        None,
+        0,
+        False,
+        None,
+        lambda x: x,
+    )
+    client = TestClient(app)
+    resp = client.get("/ubuntu/pool/main/v/vim/vim_1.0_amd64.deb")
+    assert resp.status_code == 200
+    assert resp.content == b"cached-deb"
+    assert resp.headers.get("content-length") == "10"
+
+
 def test_asgi_app_routes_api_v1_health_when_enabled(tmp_path: Path) -> None:
     """Full ASGI app with enable_api=True: GET /api/v1/health returns 200 (FastAPI wired)."""
     from starlette.testclient import TestClient

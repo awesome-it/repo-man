@@ -48,6 +48,8 @@ upstreams:
     suites: [jammy]
     components: [main, universe]
     archs: [amd64]
+    # Ubuntu/Debian: keep one path_prefix (Filenames usually differ across suites).
+    split_suites: false
   - name: k8s-v1.34
     url: https://pkgs.k8s.io/core:/stable:/v1.34/deb/
     layout: single-stream
@@ -59,10 +61,20 @@ upstreams:
     suites: [jammy-infra-security, jammy-infra-updates]
     components: [main]
     archs: [amd64]
+    split_suites: false
     # Optional upstream auth (for protected upstreams such as ESM):
     auth:
       type: bearer
       token_env: REPO_MIRROR_ESM_TOKEN
+  # Vendor classic repos that reuse pool Filenames across suites (e.g. GitLab):
+  # omit split_suites (defaults to true) so each suite gets /GitLab/<suite>.
+  # - name: GitLab
+  #   url: https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/
+  #   layout: classic
+  #   path_prefix: /GitLab
+  #   suites: [focal, jammy, noble]
+  #   components: [main]
+  #   archs: [amd64]
 
 # Optional: metadata cache TTL in seconds; cached metadata is re-fetched when older than this (default 1800)
 # metadata_ttl_seconds: 1800
@@ -79,6 +91,23 @@ disk:
 # api:
 #   enable: true
 ```
+
+### Suite splitting (`split_suites`)
+
+Classic APT upstreams with **two or more suites** are expanded at load time into one logical upstream per suite (`path_prefix/<suite>`, cache name `name-suite`) unless `split_suites: false`.
+
+That isolates the shared `pool/` cache so suites that advertise the same `Filename` with different blobs (common on some vendor repos such as GitLab) cannot overwrite each other. Ubuntu and Debian defaults set `split_suites: false` so clients keep using a single `/ubuntu` or `/debian` prefix.
+
+Example after expansion for GitLab with suites `jammy` and `noble`:
+
+- Serve: `/GitLab/jammy/...` and `/GitLab/noble/...`
+- Client: `deb http://mirror/GitLab/jammy jammy main`
+
+CLI: `repo-man cache add-upstream ... --split-suites` / `--no-split-suites` (default when omitted: split for classic multi-suite).
+
+### Package pull-through (stream-through)
+
+Pool package misses (`.deb` / `.rpm` / `.apk`) are **streamed through**: the ASGI server sends upstream bytes to the client as they arrive while teeing them to `cache/<upstream>/….partial`, then atomically renaming to the final key. Concurrent clients for the same key attach to one in-flight fetch (partial replay + live fan-out). Client disconnect does not cancel the upstream fill. Metadata (Release, Packages, repodata, APKINDEX, etc.) remains store-then-serve.
 
 ### Upstream authentication
 

@@ -1,0 +1,97 @@
+# Heavy Docker matrix: suite-split GitLab CE + Runner on Ubuntu 20.04/22.04/24.04.
+# Opt-in: RUN_GITLAB_SUITE_DOCKER=1 pytest -m docker tests/docker/test_gitlab_suites.py
+# Or: ./tests/docker/run_gitlab_suites.sh
+#
+# Proves parallel + sequential installs and cross-suite reinstalls against a shared cache.
+
+services:
+  repo-man:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "18081:8080"
+    environment:
+      REPO_MIRROR_REPO_ROOT: /data
+      # Keep all suite blobs; GitLab .debs are large and share package names across suites.
+      CACHE_VERSIONS_PER_PACKAGE: "5"
+      # Disable disk watermark for this heavy matrix
+      REPO_MIRROR_DISK_HIGH_WATERMARK_BYTES: "0"
+    volumes:
+      - gitlab_suite_data:/data
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /data/config.yaml ]; then
+          repo-man cache add-upstream --name ubuntu \
+            --url http://archive.ubuntu.com/ubuntu/ \
+            --format apt --layout classic --path-prefix /ubuntu \
+            --suites focal,focal-updates,focal-security,jammy,jammy-updates,jammy-security,noble,noble-updates,noble-security \
+            --components main,universe --archs amd64 \
+            --no-split-suites
+          # Classic multi-suite → split by default into /GitLab/{focal,jammy,noble}
+          repo-man cache add-upstream --name GitLab \
+            --url https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/ \
+            --format apt --layout classic --path-prefix /GitLab \
+            --suites focal,jammy,noble --components main --archs amd64
+          repo-man cache add-upstream --name gitlab-runner \
+            --url https://packages.gitlab.com/runner/gitlab-runner/ubuntu/ \
+            --format apt --layout classic --path-prefix /gitlab-runner \
+            --suites focal,jammy,noble --components main --archs amd64
+        fi
+        exec repo-man serve --bind 0.0.0.0 --port 8080 --no-default-upstreams
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/metrics')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  gitlab-client-focal:
+    image: ubuntu:20.04
+    profiles: ["client"]
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+      SUITE: focal
+      MODE: ${CLIENT_MODE:-install}
+      REPO_MAN: repo-man:8080
+    volumes:
+      - ./gitlab_suite_client.sh:/client.sh:ro
+    entrypoint: ["bash", "/client.sh"]
+
+  gitlab-client-jammy:
+    image: ubuntu:22.04
+    profiles: ["client"]
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+      SUITE: jammy
+      MODE: ${CLIENT_MODE:-install}
+      REPO_MAN: repo-man:8080
+    volumes:
+      - ./gitlab_suite_client.sh:/client.sh:ro
+    entrypoint: ["bash", "/client.sh"]
+
+  gitlab-client-noble:
+    image: ubuntu:24.04
+    profiles: ["client"]
+    depends_on:
+      repo-man:
+        condition: service_healthy
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+      SUITE: noble
+      MODE: ${CLIENT_MODE:-install}
+      REPO_MAN: repo-man:8080
+    volumes:
+      - ./gitlab_suite_client.sh:/client.sh:ro
+    entrypoint: ["bash", "/client.sh"]
+
+volumes:
+  gitlab_suite_data: {}

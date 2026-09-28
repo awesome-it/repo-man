@@ -2,4 +2,4 @@
 repo_data
 .pytest_cache
 __pycache__/
-*.pyc
+*.pyc.idea

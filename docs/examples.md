@@ -29,6 +29,7 @@ upstreams:
     suites: [jammy, jammy-updates, jammy-security, noble, noble-updates, noble-security]
     components: [main, universe]
     archs: [amd64]
+    split_suites: false
   # Password protected repos liek ubuntu-pro
   # Note: Client access is not passwort protected anymore!
   - name: ubuntu-esm-apps
@@ -43,6 +44,7 @@ upstreams:
     - main
     archs:
     - amd64
+    split_suites: false
     # Yes this is correct for ubuntu pro...
     auth:
       type: basic
@@ -55,10 +57,33 @@ upstreams:
     suites: [bookworm, bookworm-updates]
     components: [main, contrib]
     archs: [amd64]
+    split_suites: false
+  # GitLab CE: classic multi-suite; split_suites defaults to true → /GitLab/<suite>
+  - name: GitLab
+    url: https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/
+    layout: classic
+    path_prefix: /GitLab
+    suites: [focal, jammy, noble]
+    components: [main]
+    archs: [amd64]
+  - name: gitlab-runner
+    url: https://packages.gitlab.com/runner/gitlab-runner/ubuntu/
+    layout: classic
+    path_prefix: /gitlab-runner
+    suites: [focal, jammy, noble]
+    components: [main]
+    archs: [amd64]
 
 # Cap cache size; published packages under /local/ are never pruned
 disk:
   high_watermark_bytes: 10737418240   # 10 GiB
+```
+
+GitLab client apt lines (after suite split):
+
+```text
+deb http://repo-man.example.com:8080/GitLab/jammy jammy main
+deb http://repo-man.example.com:8080/gitlab-runner/jammy jammy main
 ```
 
 ### Run

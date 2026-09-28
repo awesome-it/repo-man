@@ -81,6 +81,19 @@ To run only APT-related clients and skip RPM, use the same compose file but run 
 
 Exit code 0 from each client means the mirror served that format successfully.
 
+## GitLab suite-split matrix (heavy, opt-in)
+
+Proves classic multi-suite **suite split** for GitLab CE + Runner on Ubuntu 20.04 / 22.04 / 24.04 (focal, jammy, noble): sequential install, cross-suite reinstall after other suites warmed the cache, and parallel install. Expect multi-GB downloads and long runtimes.
+
+```bash
+# From project root
+./tests/docker/run_gitlab_suites.sh
+# or:
+RUN_GITLAB_SUITE_DOCKER=1 uv run pytest -m docker tests/docker/test_gitlab_suites.py -v
+```
+
+Compose file: `tests/docker/compose.gitlab-suites.yaml`. Clients use `/GitLab/<suite>` and `/gitlab-runner/<suite>` (default `split_suites` expansion). Ubuntu archive is seeded with `--no-split-suites` for dependency packages.
+
 ## Cleanup
 
 ```bash
@@ -91,4 +104,10 @@ Optionally remove the volume to clear cached packages:
 
 ```bash
 docker compose -f tests/docker/compose.integration.yaml down -v
+```
+
+For the GitLab matrix:
+
+```bash
+docker compose -p repoman-gitlab-suites -f tests/docker/compose.gitlab-suites.yaml down -v
 ```

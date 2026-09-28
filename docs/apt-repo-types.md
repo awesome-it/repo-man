@@ -7,6 +7,7 @@ Repo-man is format-extensible; APT is the first included format. This page descr
 - **Layout**: Standard `dists/SUITE/COMPONENT/binary-ARCH/` (or `main/amd64/`) and `pool/`. Multiple suites, components, and architectures under one base URL.
 - **Example base URLs**: `http://archive.ubuntu.com/ubuntu`, `https://packages.gitlab.com/...`
 - **Config**: Add upstream with `--layout classic`, `--path-prefix /ubuntu/`, and optionally `--suites`, `--components`, `--archs` to filter. Suites/components/archs can be discovered from upstream `Release` or restricted in config.
+- **Suite split (default)**: Classic APT with 2+ suites expands to `path_prefix/<suite>` unless `split_suites: false`. Use `split_suites: false` for Ubuntu/Debian (one shared prefix). Leave the default for vendor repos like GitLab where pool Filenames can collide across suites; clients then use e.g. `deb http://mirror/GitLab/jammy jammy main`.
 
 ## Kubernetes (pkgs.k8s.io)
 
@@ -35,6 +36,7 @@ upstreams:
     suites: [jammy-infra-security, jammy-infra-updates]
     components: [main]
     archs: [amd64]
+    split_suites: false
     auth:
       type: basic
       username: bearer
