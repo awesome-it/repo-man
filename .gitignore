@@ -3,3 +3,5 @@ repo_data
 .pytest_cache
 __pycache__/
 *.pyc.idea
+image
+.idea/
