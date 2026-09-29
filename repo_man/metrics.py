@@ -54,6 +54,16 @@ upstream_last_access_timestamp_seconds = Gauge(
     "Unix timestamp of last fetch from this upstream (metadata or package).",
     ["upstream"],
 )
+upstream_up = Gauge(
+    "repo_man_upstream_up",
+    "1 if the last health probe could fetch metadata and a sample package from this upstream, else 0.",
+    ["upstream"],
+)
+upstream_last_check_timestamp_seconds = Gauge(
+    "repo_man_upstream_last_check_timestamp_seconds",
+    "Unix timestamp when the last upstream health probe finished.",
+    ["upstream"],
+)
 cache_package_hash_mismatch_total = Counter(
     "repo_man_cache_package_hash_mismatch_total",
     "Cached packages dropped because remote hash changed (re-fetch on next request)",

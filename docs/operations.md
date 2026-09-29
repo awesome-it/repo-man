@@ -17,6 +17,8 @@ Running repo-man in production: config reference, Prometheus metrics, and deploy
 | `REPO_MIRROR_REDIS_URL` | Redis URL when `REPO_MIRROR_PACKAGE_HASH_STORE=redis`. | `redis://localhost:6379/0` |
 | `REPO_MIRROR_NO_DEFAULT_UPSTREAMS` | If set to `1`, `true`, or `yes`, disables built-in default upstreams when no config file (or empty upstreams) is present. | — |
 | `REPO_MIRROR_ENABLE_API` | If set to `1`, `true`, or `yes`, enables the REST API (`/api/v1` and legacy `POST /api/publish`). **Off by default.** See [Publish API](#publish-api) below. | — |
+| `REPO_MIRROR_PUBLIC_BASE_URL` | Public base URL for client-facing mirror URLs in `repo-man status` (e.g. `https://repo.example.com`). | — |
+| `REPO_MIRROR_HEALTH_CHECK_INTERVAL_SECONDS` | Interval between upstream health probes while `serve` is running (metadata + sample package). `0` disables the loop after the initial probe. | 300 |
 
 ### Default upstreams (no config)
 
@@ -48,7 +50,7 @@ upstreams:
     suites: [jammy]
     components: [main, universe]
     archs: [amd64]
-    # Ubuntu/Debian: keep one path_prefix (Filenames usually differ across suites).
+    # Ubuntu/Debian/Docker: one shared path_prefix (default is false; explicit for clarity).
     split_suites: false
   - name: k8s-v1.34
     url: https://pkgs.k8s.io/core:/stable:/v1.34/deb/
@@ -67,7 +69,7 @@ upstreams:
       type: bearer
       token_env: REPO_MIRROR_ESM_TOKEN
   # Vendor classic repos that reuse pool Filenames across suites (e.g. GitLab):
-  # omit split_suites (defaults to true) so each suite gets /GitLab/<suite>.
+  # set split_suites: true so each suite gets /GitLab/<suite>.
   # - name: GitLab
   #   url: https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/
   #   layout: classic
@@ -75,9 +77,16 @@ upstreams:
   #   suites: [focal, jammy, noble]
   #   components: [main]
   #   archs: [amd64]
+  #   split_suites: true
 
 # Optional: metadata cache TTL in seconds; cached metadata is re-fetched when older than this (default 1800)
 # metadata_ttl_seconds: 1800
+
+# Optional: public base URL for client lines shown by `repo-man status`
+# public_base_url: https://repo.example.com
+
+# Optional: how often serve probes each upstream (metadata + sample package); default 300
+# health_check_interval_seconds: 300
 
 # Optional: package hash store: "local" (SQLite at repo_root/hash_store.db) or "redis"
 # package_hash_store: local
@@ -94,16 +103,22 @@ disk:
 
 ### Suite splitting (`split_suites`)
 
-Classic APT upstreams with **two or more suites** are expanded at load time into one logical upstream per suite (`path_prefix/<suite>`, cache name `name-suite`) unless `split_suites: false`.
+Classic APT upstreams with **two or more suites** share one `path_prefix` by default. Set `split_suites: true` to expand at load time into one logical upstream per suite (`path_prefix/<suite>`, cache name `name-suite`).
 
-That isolates the shared `pool/` cache so suites that advertise the same `Filename` with different blobs (common on some vendor repos such as GitLab) cannot overwrite each other. Ubuntu and Debian defaults set `split_suites: false` so clients keep using a single `/ubuntu` or `/debian` prefix.
+That isolates the shared `pool/` cache so suites that advertise the same `Filename` with different blobs (common on some vendor repos such as GitLab) cannot overwrite each other. Ubuntu, Debian, and Docker keep the default (`false`) so clients use a single `/ubuntu`, `/debian`, or `/docker` prefix.
 
-Example after expansion for GitLab with suites `jammy` and `noble`:
+Example after expansion for GitLab with `split_suites: true` and suites `jammy` and `noble`:
+
+```yaml
+# becomes effectively:
+# path_prefix: /GitLab/jammy  (name: GitLab-jammy, suites: [jammy])
+# path_prefix: /GitLab/noble  (name: GitLab-noble, suites: [noble])
+```
+
+CLI: `repo-man cache add-upstream ... --split-suites` / `--no-split-suites` (default when omitted: no split).
 
 - Serve: `/GitLab/jammy/...` and `/GitLab/noble/...`
 - Client: `deb http://mirror/GitLab/jammy jammy main`
-
-CLI: `repo-man cache add-upstream ... --split-suites` / `--no-split-suites` (default when omitted: split for classic multi-suite).
 
 ### Package pull-through (stream-through)
 
@@ -233,6 +248,8 @@ Endpoint: **`GET /metrics`** on the same HTTP server as the repo (same port).
 | `repo_man_cache_upstream_fetch_errors_total` | Counter | upstream | Fetch errors. |
 | `repo_man_packages_pulled_from_upstream_total` | Counter | upstream | Packages fetched from upstream and stored (pull-through). |
 | `repo_man_upstream_last_access_timestamp_seconds` | Gauge | upstream | Unix timestamp of last fetch from this upstream (metadata or package). |
+| `repo_man_upstream_up` | Gauge | upstream | `1` if the last health probe fetched metadata and a sample package successfully, else `0`. |
+| `repo_man_upstream_last_check_timestamp_seconds` | Gauge | upstream | Unix timestamp when the last upstream health probe finished. |
 | `repo_man_cache_package_hash_mismatch_total` | Counter | upstream | Cached packages dropped because the remote hash changed (re-fetched on next request). |
 | `repo_man_packages_served_total` | Counter | path_prefix | Packages served to clients. |
 | `repo_man_client_packages_served_total` | Counter | client | Packages served per client (client = IP or hostname from reverse DNS). |
@@ -279,4 +296,6 @@ docker compose up -d
 
 ## Health checks
 
-The service does not expose a dedicated health endpoint. Use `GET /metrics` (200) or `GET /<path_prefix>/` (200 or 404) as a liveness check. For readiness, ensure config and repo root are accessible.
+**Process liveness:** use `GET /metrics` (200) or `GET /api/v1/health` when the API is enabled.
+
+**Upstream reachability:** while `serve` runs, repo-man periodically probes each configured upstream (metadata + a sample package) and sets `repo_man_upstream_up{upstream="..."}` to `1` or `0`. Results are also written to `<repo_root>/upstream_status.json`. Use `repo-man status` to print last-known state (or `repo-man status --check` to probe immediately). See [monitoring.md](monitoring.md#upstream-health-probes-preferred).

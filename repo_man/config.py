@@ -19,6 +19,8 @@ ENV_PACKAGE_HASH_STORE = "REPO_MIRROR_PACKAGE_HASH_STORE"
 ENV_REDIS_URL = "REPO_MIRROR_REDIS_URL"
 ENV_NO_DEFAULT_UPSTREAMS = "REPO_MIRROR_NO_DEFAULT_UPSTREAMS"
 ENV_ENABLE_API = "REPO_MIRROR_ENABLE_API"
+ENV_PUBLIC_BASE_URL = "REPO_MIRROR_PUBLIC_BASE_URL"
+ENV_HEALTH_CHECK_INTERVAL_SECONDS = "REPO_MIRROR_HEALTH_CHECK_INTERVAL_SECONDS"
 
 DEFAULT_CACHE_VERSIONS_PER_PACKAGE = 3
 DEFAULT_PACKAGE_HASH_STORE = "local"
@@ -26,6 +28,7 @@ DEFAULT_METADATA_TTL_SECONDS = 1800  # 30 minutes
 DEFAULT_DISK_HIGH_WATERMARK_BYTES = 10 * 1024**3  # 10 GiB
 DEFAULT_SERVE_BIND = "0.0.0.0"
 DEFAULT_SERVE_PORT = 8080
+DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 300
 
 
 def get_repo_root(override: str | Path | None = None) -> Path:
@@ -134,6 +137,38 @@ def get_enable_api(config_path: Path | None = None) -> bool:
     return False
 
 
+def get_public_base_url(config_path: Path | None = None) -> str | None:
+    """Return public base URL for client-facing mirror URLs (no trailing slash), or None."""
+    value = os.environ.get(ENV_PUBLIC_BASE_URL)
+    if value is not None and value.strip():
+        return value.strip().rstrip("/")
+    if config_path and config_path.exists():
+        data = load_config_file(config_path)
+        v = data.get("public_base_url")
+        if v is not None and str(v).strip():
+            return str(v).strip().rstrip("/")
+    return None
+
+
+def get_health_check_interval_seconds(config_path: Path | None = None) -> int:
+    """Return interval between upstream health probes in seconds. Default 300."""
+    value = os.environ.get(ENV_HEALTH_CHECK_INTERVAL_SECONDS)
+    if value is not None and value.strip() != "":
+        try:
+            return max(0, int(value))
+        except ValueError:
+            pass
+    if config_path and config_path.exists():
+        data = load_config_file(config_path)
+        v = data.get("health_check_interval_seconds")
+        if v is not None:
+            try:
+                return max(0, int(v))
+            except (ValueError, TypeError):
+                pass
+    return DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+
+
 def get_redis_url(config_path: Path | None = None) -> str:
     """Return Redis URL for package hash store when type is redis. Default redis://localhost:6379/0."""
     value = os.environ.get(ENV_REDIS_URL)
@@ -203,19 +238,19 @@ def _normalize_suites(upstream: dict[str, Any]) -> list[str]:
 
 
 def _wants_split_suites(upstream: dict[str, Any]) -> bool:
-    """Classic multi-suite APT splits by default; explicit false opts out."""
+    """Classic multi-suite APT keeps one prefix by default; explicit true opts in to split."""
     if "split_suites" in upstream:
         return bool(upstream.get("split_suites"))
-    return True
+    return False
 
 
 def expand_split_suite_upstreams(upstreams: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Expand classic APT upstreams with 2+ suites into one upstream per suite.
+    Expand classic APT upstreams with 2+ suites into one upstream per suite when opted in.
 
-    Default is to split (isolated path_prefix / cache root per suite) so shared pool
-    Filenames cannot collide across suites. Set split_suites: false to keep a single
-    prefix (Ubuntu/Debian-style).
+    Default is a single shared path_prefix (Ubuntu/Debian/Docker-style). Set
+    split_suites: true for vendor repos where pool Filenames collide across suites
+    (e.g. GitLab CE) so each suite gets an isolated path_prefix / cache root.
     """
     result: list[dict[str, Any]] = []
     seen_prefixes: set[str] = set()
@@ -326,8 +361,8 @@ def get_effective_upstreams(
     upstreams unless disabled by config, env REPO_MIRROR_NO_DEFAULT_UPSTREAMS, or --no-default-upstreams.
     used_defaults is True when the returned list is the built-in default upstreams.
 
-    Classic multi-suite APT upstreams are expanded into per-suite prefixes unless
-    split_suites is false (see expand_split_suite_upstreams).
+    Classic multi-suite APT upstreams are expanded into per-suite prefixes only when
+    split_suites is true (see expand_split_suite_upstreams).
     """
     from_config = get_upstreams_from_config(config_path) if config_path else []
     if from_config:
@@ -378,4 +413,6 @@ def get_effective_config(
         "serve_bind": DEFAULT_SERVE_BIND,
         "serve_port": DEFAULT_SERVE_PORT,
         "enable_api": get_enable_api(config_path),
+        "public_base_url": get_public_base_url(config_path),
+        "health_check_interval_seconds": get_health_check_interval_seconds(config_path),
     }

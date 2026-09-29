@@ -13,7 +13,27 @@ from repo_man.config import (
 )
 
 
-def test_expand_default_splits_classic_multi_suite() -> None:
+def test_expand_default_keeps_single_prefix() -> None:
+    """Default is no suite split (shared path_prefix)."""
+    upstreams = [
+        {
+            "name": "docker",
+            "url": "https://download.docker.com/linux/ubuntu/",
+            "format": "apt",
+            "layout": "classic",
+            "path_prefix": "/docker",
+            "suites": ["jammy", "noble"],
+            "components": ["stable"],
+        }
+    ]
+    expanded = expand_split_suite_upstreams(upstreams)
+    assert len(expanded) == 1
+    assert expanded[0]["name"] == "docker"
+    assert expanded[0]["path_prefix"] == "/docker"
+    assert expanded[0]["suites"] == ["jammy", "noble"]
+
+
+def test_expand_explicit_true_splits_classic_multi_suite() -> None:
     upstreams = [
         {
             "name": "GitLab",
@@ -23,6 +43,7 @@ def test_expand_default_splits_classic_multi_suite() -> None:
             "path_prefix": "/GitLab",
             "suites": ["focal", "jammy", "noble"],
             "components": ["main"],
+            "split_suites": True,
         }
     ]
     expanded = expand_split_suite_upstreams(upstreams)
@@ -59,6 +80,7 @@ def test_expand_single_suite_no_split() -> None:
             "layout": "classic",
             "path_prefix": "/GitLab",
             "suites": ["jammy"],
+            "split_suites": True,
         }
     ]
     expanded = expand_split_suite_upstreams(upstreams)
@@ -74,12 +96,14 @@ def test_expand_skips_non_classic_and_non_apt() -> None:
             "layout": "single-stream",
             "path_prefix": "/k8s",
             "suites": ["v1", "v2"],
+            "split_suites": True,
         },
         {
             "name": "rocky",
             "format": "rpm",
             "path_prefix": "/rocky9",
             "suites": ["a", "b"],
+            "split_suites": True,
         },
     ]
     expanded = expand_split_suite_upstreams(upstreams)
@@ -103,6 +127,7 @@ def test_expand_path_prefix_collision_raises() -> None:
             "layout": "classic",
             "path_prefix": "/GitLab",
             "suites": ["jammy", "noble"],
+            "split_suites": True,
         },
     ]
     with pytest.raises(ValueError, match="path_prefix collision"):
@@ -123,7 +148,23 @@ def test_default_upstreams_ubuntu_debian_not_split() -> None:
     assert "debian-bookworm" not in names
 
 
-def test_get_effective_upstreams_expands_config(tmp_path: Path) -> None:
+def test_get_effective_upstreams_does_not_split_by_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "upstreams:\n"
+        "  - name: docker\n"
+        "    url: https://download.docker.com/linux/ubuntu/\n"
+        "    format: apt\n"
+        "    layout: classic\n"
+        "    path_prefix: /docker\n"
+        "    suites: [jammy, noble]\n"
+    )
+    upstreams, used_defaults = get_effective_upstreams(config_path)
+    assert used_defaults is False
+    assert [u["path_prefix"] for u in upstreams] == ["/docker"]
+
+
+def test_get_effective_upstreams_expands_when_split_suites_true(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "upstreams:\n"
@@ -133,6 +174,7 @@ def test_get_effective_upstreams_expands_config(tmp_path: Path) -> None:
         "    layout: classic\n"
         "    path_prefix: /GitLab\n"
         "    suites: [jammy, noble]\n"
+        "    split_suites: true\n"
     )
     upstreams, used_defaults = get_effective_upstreams(config_path)
     assert used_defaults is False

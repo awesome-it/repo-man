@@ -61,8 +61,9 @@ def cache() -> None:
     "--split-suites/--no-split-suites",
     default=None,
     help=(
-        "For classic APT with 2+ suites: expand into per-suite path prefixes (default: yes). "
-        "Use --no-split-suites for Ubuntu/Debian-style shared pool under one prefix."
+        "For classic APT with 2+ suites: expand into per-suite path prefixes. "
+        "Default is shared prefix (--no-split-suites). Use --split-suites for vendors "
+        "like GitLab CE where pool Filenames collide across suites."
     ),
 )
 @click.pass_context

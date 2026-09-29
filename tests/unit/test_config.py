@@ -7,6 +7,7 @@ import pytest
 
 from repo_man.config import (
     DEFAULT_CACHE_VERSIONS_PER_PACKAGE,
+    DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,
     get_cache_versions_per_package,
     get_config_path,
     get_default_upstreams,
@@ -14,6 +15,8 @@ from repo_man.config import (
     get_effective_config,
     get_effective_upstreams,
     get_enable_api,
+    get_health_check_interval_seconds,
+    get_public_base_url,
     get_repo_root,
     load_config_file,
 )
@@ -63,7 +66,31 @@ def test_get_effective_config() -> None:
     assert "cache_versions_per_package" in cfg
     assert "upstreams" in cfg
     assert "enable_api" in cfg
+    assert "public_base_url" in cfg
+    assert "health_check_interval_seconds" in cfg
     assert isinstance(cfg["upstreams"], list)
+
+
+def test_get_public_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPO_MIRROR_PUBLIC_BASE_URL", "https://repo.example.com/")
+    assert get_public_base_url(None) == "https://repo.example.com"
+
+
+def test_get_public_base_url_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPO_MIRROR_PUBLIC_BASE_URL", raising=False)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("public_base_url: http://mirror:8080\n")
+    assert get_public_base_url(cfg) == "http://mirror:8080"
+
+
+def test_get_health_check_interval_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPO_MIRROR_HEALTH_CHECK_INTERVAL_SECONDS", raising=False)
+    assert get_health_check_interval_seconds(None) == DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+
+
+def test_get_health_check_interval_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPO_MIRROR_HEALTH_CHECK_INTERVAL_SECONDS", "60")
+    assert get_health_check_interval_seconds(None) == 60
 
 
 def test_load_config_file_missing(tmp_path: Path) -> None:

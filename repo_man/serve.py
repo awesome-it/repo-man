@@ -8,6 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any, Callable
 
 from repo_man.formats.registry import get_backend
@@ -40,6 +41,34 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="repo_man_rever
 
 _REVERSE_LOOKUP_TIMEOUT = 1.0
 _MAINTENANCE_INTERVAL_SECONDS = 30.0
+
+
+def _health_probe_loop(
+    stop_event: threading.Event,
+    repo_root: Path,
+    upstreams: list[dict[str, Any]],
+    public_base_url: str | None,
+    interval_seconds: int,
+) -> None:
+    """Periodically probe upstreams; run once immediately, then every interval_seconds."""
+    from repo_man.health import init_health_metrics, run_health_checks
+
+    init_health_metrics(upstreams)
+    while True:
+        try:
+            run_health_checks(
+                upstreams,
+                repo_root,
+                public_base_url=public_base_url,
+                update_metrics=True,
+            )
+        except Exception as e:
+            logger.warning("Upstream health probe failed: %s", e)
+        if interval_seconds <= 0:
+            # One-shot only when interval disabled
+            return
+        if stop_event.wait(interval_seconds):
+            return
 
 
 def _reverse_lookup(ip: str) -> None:
@@ -316,6 +345,10 @@ def run_server(
     keep_versions_per_package: int = 0,
     enable_api: bool = False,
     access_log: bool = False,
+    *,
+    repo_root: Path | str | None = None,
+    public_base_url: str | None = None,
+    health_check_interval_seconds: int = 300,
 ) -> None:
     """Run ASGI server (uvicorn) until interrupted. /api/v1 is FastAPI; other paths serve repo and /metrics."""
     import copy
@@ -338,6 +371,7 @@ def run_server(
     )
     maintenance_stop = threading.Event()
     maintenance_thread: threading.Thread | None = None
+    health_thread: threading.Thread | None = None
     if keep_versions_per_package > 0 or (
         disk_high_watermark_bytes is not None and get_disk_usage_fn is not None
     ):
@@ -358,6 +392,20 @@ def run_server(
             daemon=True,
         )
         maintenance_thread.start()
+    if repo_root is not None and upstreams:
+        health_thread = threading.Thread(
+            target=_health_probe_loop,
+            args=(
+                maintenance_stop,
+                Path(repo_root),
+                upstreams,
+                public_base_url,
+                health_check_interval_seconds,
+            ),
+            name="repo_man_health",
+            daemon=True,
+        )
+        health_thread.start()
     log_config = copy.deepcopy(LOGGING_CONFIG)
     # Include timestamps on both application and access logs.
     log_config["formatters"]["default"]["fmt"] = "%(asctime)s %(levelprefix)s %(message)s"
@@ -380,3 +428,5 @@ def run_server(
         maintenance_stop.set()
         if maintenance_thread is not None:
             maintenance_thread.join(timeout=2.0)
+        if health_thread is not None:
+            health_thread.join(timeout=2.0)

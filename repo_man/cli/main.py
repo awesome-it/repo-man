@@ -10,7 +10,7 @@ from typing import Any
 import click
 
 from repo_man import __version__
-from repo_man.cli import cache_cmd, config_cmd, publish_cmd, serve_cmd
+from repo_man.cli import cache_cmd, config_cmd, publish_cmd, serve_cmd, status_cmd
 
 
 def _output_json_result(obj: dict[str, Any]) -> None:
@@ -77,3 +77,4 @@ main.add_command(serve_cmd.serve)
 main.add_command(cache_cmd.cache)
 main.add_command(publish_cmd.publish)
 main.add_command(config_cmd.config_group)
+main.add_command(status_cmd.status)

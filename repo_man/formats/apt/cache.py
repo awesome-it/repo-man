@@ -128,6 +128,13 @@ def fetch_metadata_from_upstream(
     upstream_config: dict[str, Any] | None = None,
 ) -> bytes | None:
     """Fetch a single file from upstream (e.g. Release, Packages.gz)."""
+    from repo_man.upstream_http import (
+        classify_exception,
+        format_http_status_error,
+        format_unexpected_content_error,
+        looks_like_html,
+    )
+
     effective_base_url = _resolve_metadata_base_url(base_url, path, upstream_config)
     url = effective_base_url.rstrip("/") + "/" + path.lstrip("/")
     headers, basic_auth = _resolve_upstream_auth(upstream_config)
@@ -135,10 +142,19 @@ def fetch_metadata_from_upstream(
         with httpx.Client(follow_redirects=True, timeout=30.0) as client:
             r = client.get(url, headers=headers, auth=basic_auth)
             if r.status_code == 200:
+                if looks_like_html(r.content):
+                    logger.warning(
+                        "Metadata fetch failed: %s",
+                        format_unexpected_content_error(url, "repo metadata", r.content),
+                    )
+                    return None
                 return r.content
-            logger.warning("Metadata fetch failed: url=%s status=%s", url, r.status_code)
+            logger.warning(
+                "Metadata fetch failed: %s",
+                format_http_status_error(url, r.status_code, r.content),
+            )
     except Exception as e:
-        logger.warning("Metadata fetch failed: url=%s error=%s", url, e)
+        logger.warning("Metadata fetch failed: url=%s error=%s", url, classify_exception(e))
     return None
 
 
@@ -298,10 +314,17 @@ def attach_package_stream(
             req = client.build_request("GET", url, headers=headers)
             r = client.send(req, stream=True, auth=basic_auth)
             if r.status_code != 200:
+                from repo_man.upstream_http import format_http_status_error
+
+                body_preview = b""
+                try:
+                    body_preview = r.read(512)
+                except Exception:
+                    pass
                 r.close()
                 client.close()
                 cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-                raise RuntimeError(f"upstream status {r.status_code}")
+                raise RuntimeError(format_http_status_error(url, r.status_code, body_preview))
             cl_hdr = r.headers.get("content-length")
             content_length = int(cl_hdr) if cl_hdr and cl_hdr.isdigit() else None
 
@@ -324,8 +347,15 @@ def attach_package_stream(
         logger.info("Saved package: upstream=%s package=%s", upstream_id, relative_path)
 
     def on_error(exc: BaseException) -> None:
+        from repo_man.upstream_http import classify_exception
+
         cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-        logger.warning("Package fetch failed: upstream=%s path=%s error=%s", upstream_id, relative_path, exc)
+        logger.warning(
+            "Package fetch failed: upstream=%s path=%s error=%s",
+            upstream_id,
+            relative_path,
+            classify_exception(exc),
+        )
 
     if storage.exists(key):
         return get_or_attach_package_stream(storage, key, fetch_upstream)

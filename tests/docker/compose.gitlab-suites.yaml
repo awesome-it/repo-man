@@ -30,15 +30,17 @@ services:
             --suites focal,focal-updates,focal-security,jammy,jammy-updates,jammy-security,noble,noble-updates,noble-security \
             --components main,universe --archs amd64 \
             --no-split-suites
-          # Classic multi-suite → split by default into /GitLab/{focal,jammy,noble}
+          # Classic multi-suite with colliding pool paths → --split-suites
           repo-man cache add-upstream --name GitLab \
             --url https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/ \
             --format apt --layout classic --path-prefix /GitLab \
-            --suites focal,jammy,noble --components main --archs amd64
+            --suites focal,jammy,noble --components main --archs amd64 \
+            --split-suites
           repo-man cache add-upstream --name gitlab-runner \
             --url https://packages.gitlab.com/runner/gitlab-runner/ubuntu/ \
             --format apt --layout classic --path-prefix /gitlab-runner \
-            --suites focal,jammy,noble --components main --archs amd64
+            --suites focal,jammy,noble --components main --archs amd64 \
+            --split-suites
         fi
         exec repo-man serve --bind 0.0.0.0 --port 8080 --no-default-upstreams
     healthcheck:

@@ -37,7 +37,23 @@ Use **per-client** metrics to see which hosts use the cache and to alert when a 
 
 ## Upstream update failures
 
-When repo-man pulls from an upstream (e.g. Ubuntu archive), failures can be due to the upstream being down, network issues, or bad URL/suite/config. Use these metrics to detect and alert.
+When repo-man pulls from an upstream (e.g. Ubuntu archive), failures can be due to the upstream being down, network issues, a blocking HTTP/HTTPS proxy, or bad URL/suite/config. Use these metrics to detect and alert.
+
+### Upstream health probes (preferred)
+
+While `serve` is running, repo-man regularly fetches **metadata and a sample package** from each configured upstream (same proxy/SSL behavior as pull-through). Results:
+
+- `repo_man_upstream_up{upstream="<name>"}` — `1` healthy, `0` unhealthy (metadata or package failed).
+- `repo_man_upstream_last_check_timestamp_seconds{upstream="<name>"}` — when the probe finished.
+- CLI: `repo-man status` (last-known) / `repo-man status --check` (live probe). Status file: `<repo_root>/upstream_status.json`.
+
+**Alert idea: upstream unhealthy**
+
+```promql
+repo_man_upstream_up == 0
+```
+
+Proxy denials typically show up as SSL errors (HTTPS intercept with a self-signed cert) or HTTP 200 HTML error pages (detected by content sniffing).
 
 ### Upstream last successful access
 
@@ -140,6 +156,7 @@ rate(repo_man_publish_errors_total[5m]) > 0
 |------|---------|----------------|
 | Cache hits and misses | `repo_man_cache_requests_total` (label `result`: hit, miss) | Hit rate = `rate(hit)/(rate(hit)+rate(miss))` |
 | Hosts not updating | `repo_man_client_last_served_timestamp_seconds` | Time since last package served > 7 days → [client-metrics.md](client-metrics.md) |
+| Upstream unhealthy (proxy/SSL/down) | `repo_man_upstream_up` | `repo_man_upstream_up == 0` |
 | Upstream not updating | `repo_man_upstream_last_access_timestamp_seconds` | `time() - metric > 24*3600` |
 | Upstream fetch failures | `repo_man_cache_upstream_fetch_errors_total` | `rate(...[5m]) > threshold` |
 | High 404s (config/upstream) | `repo_man_http_requests_total{status="404"}` | 404 rate or ratio high per path_prefix |

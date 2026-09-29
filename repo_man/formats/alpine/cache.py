@@ -55,16 +55,43 @@ def get_or_fetch(
     url = f"{base_url}/{path_suffix.lstrip('/')}"
 
     if _is_metadata_path(path_suffix):
+        from repo_man.upstream_http import (
+            classify_exception,
+            format_http_status_error,
+            format_unexpected_content_error,
+            looks_like_html,
+        )
+
         try:
             with httpx.Client(follow_redirects=True, timeout=60.0) as client:
                 r = client.get(url)
                 if r.status_code != 200:
                     cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+                    logger.warning(
+                        "Alpine metadata fetch failed: upstream=%s path=%s error=%s",
+                        upstream_id,
+                        path_suffix,
+                        format_http_status_error(url, r.status_code, r.content),
+                    )
                     return (None, False)
                 raw = r.content
+                if looks_like_html(raw):
+                    cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
+                    logger.warning(
+                        "Alpine metadata fetch failed: upstream=%s path=%s error=%s",
+                        upstream_id,
+                        path_suffix,
+                        format_unexpected_content_error(url, "APKINDEX", raw),
+                    )
+                    return (None, False)
         except Exception as e:
             cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-            logger.warning("Alpine metadata fetch failed: upstream=%s path=%s error=%s", upstream_id, path_suffix, e)
+            logger.warning(
+                "Alpine metadata fetch failed: upstream=%s path=%s error=%s",
+                upstream_id,
+                path_suffix,
+                classify_exception(e),
+            )
             return (None, False)
         storage.put(key, raw)
         storage.put(key + ".fetched_at", str(time.time()).encode("utf-8"))
@@ -147,8 +174,15 @@ def _attach_apk_stream(
         logger.info("Saved Alpine package: upstream=%s path=%s", upstream_id, path_suffix)
 
     def on_error(exc: BaseException) -> None:
+        from repo_man.upstream_http import classify_exception
+
         cache_upstream_fetch_errors_total.labels(upstream=upstream_id).inc()
-        logger.warning("Alpine package fetch failed: upstream=%s path=%s error=%s", upstream_id, path_suffix, exc)
+        logger.warning(
+            "Alpine package fetch failed: upstream=%s path=%s error=%s",
+            upstream_id,
+            path_suffix,
+            classify_exception(exc),
+        )
 
     if storage.exists(key):
         return get_or_attach_package_stream(storage, key, fetch_upstream)

@@ -36,6 +36,8 @@ def show(ctx: click.Context) -> None:
         click.echo(f"  cache_versions_per_package: {cfg['cache_versions_per_package']}")
         click.echo(f"  metadata_ttl_seconds: {cfg['metadata_ttl_seconds']}")
         click.echo(f"  disk_high_watermark_bytes: {cfg.get('disk_high_watermark_bytes')}")
+        click.echo(f"  public_base_url: {cfg.get('public_base_url')}")
+        click.echo(f"  health_check_interval_seconds: {cfg.get('health_check_interval_seconds')}")
         click.echo(f"  serve: {cfg['serve_bind']}:{cfg['serve_port']}")
         click.echo(f"  upstreams: {len(cfg['upstreams'])} configured")
 

@@ -92,7 +92,7 @@ Proves classic multi-suite **suite split** for GitLab CE + Runner on Ubuntu 20.0
 RUN_GITLAB_SUITE_DOCKER=1 uv run pytest -m docker tests/docker/test_gitlab_suites.py -v
 ```
 
-Compose file: `tests/docker/compose.gitlab-suites.yaml`. Clients use `/GitLab/<suite>` and `/gitlab-runner/<suite>` (default `split_suites` expansion). Ubuntu archive is seeded with `--no-split-suites` for dependency packages.
+Compose file: `tests/docker/compose.gitlab-suites.yaml`. Clients use `/GitLab/<suite>` and `/gitlab-runner/<suite>` (`--split-suites`). Ubuntu archive is seeded with `--no-split-suites` for dependency packages.
 
 ## Cleanup
 

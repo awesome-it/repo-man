@@ -58,7 +58,7 @@ upstreams:
     components: [main, contrib]
     archs: [amd64]
     split_suites: false
-  # GitLab CE: classic multi-suite; split_suites defaults to true → /GitLab/<suite>
+  # GitLab CE: classic multi-suite; set split_suites: true → /GitLab/<suite>
   - name: GitLab
     url: https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/
     layout: classic
@@ -66,6 +66,7 @@ upstreams:
     suites: [focal, jammy, noble]
     components: [main]
     archs: [amd64]
+    split_suites: true
   - name: gitlab-runner
     url: https://packages.gitlab.com/runner/gitlab-runner/ubuntu/
     layout: classic
@@ -73,6 +74,7 @@ upstreams:
     suites: [focal, jammy, noble]
     components: [main]
     archs: [amd64]
+    split_suites: true
 
 # Cap cache size; published packages under /local/ are never pruned
 disk:

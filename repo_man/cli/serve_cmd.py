@@ -84,6 +84,8 @@ def serve(
     disk_high_watermark_bytes = config_module.get_disk_high_watermark_bytes(config_path)
     get_disk_usage_fn = lambda: get_repo_disk_usage_bytes(repo_root)
     keep_versions_per_package = config_module.get_cache_versions_per_package()
+    public_base_url = config_module.get_public_base_url(config_path)
+    health_check_interval_seconds = config_module.get_health_check_interval_seconds(config_path)
     if api_enabled:
         click.echo("API enabled (/api/v1). Any client that can reach the API can publish; secure it externally.", err=True)
     click.echo(f"Serving on http://{bind}:{port}")
@@ -100,4 +102,7 @@ def serve(
         keep_versions_per_package=keep_versions_per_package,
         enable_api=api_enabled,
         access_log=access_log,
+        repo_root=repo_root,
+        public_base_url=public_base_url,
+        health_check_interval_seconds=health_check_interval_seconds,
     )
